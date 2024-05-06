@@ -1,0 +1,107 @@
+<extension name="RH.CPCG_FERIADOS_FIXOS" continue="true" uuid="e5df1e0e-60e3-478a-8d6b-6f50961071b0">
+	<condition field="destination_number" expression="^(7292|7777)$"  />
+	<condition mon="1"  break="never" />
+	<condition mday="1"  break="on-true">
+		<action application="log" data="----------- Ano Novo ---------------" />
+		<action application="answer" data="" />
+		<action application="sleep" data="1000" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+	<condition mon="4"  break="never" />
+	<condition mday="21"  break="on-true">
+		<action application="log" data="----------- Tiradentes ---------------" />
+		<action application="answer" data="" />
+		<action application="sleep" data="1000" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+	<condition mon="5"  break="never" />
+	<condition mday="1"  break="on-true">
+		<action application="log" data="----------- Dia do trabalho ---------------" />
+		<action application="sleep" data="1000" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="answer" data="" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+	<condition mon="6"  break="never" />
+	<condition mday="13"  break="on-true">
+		<action application="log" data="----------- Padroeiro(a) do Município ---------------" />
+		<action application="sleep" data="1000" />
+		<action application="answer" data="" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+	<condition mon="8"  break="never" />
+	<condition mday="26"  break="on-true">
+		<action application="log" data="----------- Aniversário da Cidade ---------------" />
+		<action application="sleep" data="1000" />
+		<action application="answer" data="" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+	<condition mon="9"  break="never" />
+	<condition mday="7"  break="on-true">
+		<action application="log" data="----------- Independência do Brasil ---------------" />
+		<action application="sleep" data="1000" />
+		<action application="answer" data="" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+	<condition mon="10"  break="never" />
+	<condition mday="11"  break="on-true">
+		<action application="log" data="----------- Divisão do Estado ---------------" />
+		<action application="sleep" data="1000" />
+		<action application="answer" data="" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+	<condition mon="10"  break="never" />
+	<condition mday="12"  break="on-true">
+		<action application="log" data="----------- Padroeira do Brasil ---------------" />
+		<action application="sleep" data="1000" />
+		<action application="answer" data="" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+	<condition mon="11"  break="never" />
+	<condition mday="2"  break="on-true">
+		<action application="log" data="----------- Finados ---------------" />
+		<action application="sleep" data="1000" />
+		<action application="answer" data="" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+	<condition mon="11"  break="never" />
+	<condition mday="15"  break="on-true">
+		<action application="log" data="----------- Proclamação da República ---------------" />
+		<action application="sleep" data="1000" />
+		<action application="answer" data="" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+	<condition mon="12"  break="never" />
+	<condition mday="24"  break="on-true">
+		<action application="log" data="----------- Vespera de Natal ---------------" />
+		<action application="sleep" data="1000" />
+		<action application="answer" data="" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+	<condition mon="12"  break="never" />
+	<condition mday="25"  break="on-true">
+		<action application="log" data="----------- Natal ---------------" />
+		<action application="sleep" data="1000" />
+		<action application="answer" data="" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+	<condition mon="2"  break="never" />
+	<condition mday="1"  break="on-true">
+		<action application="log" data="----------- FERIADO TESTE ---------------" />
+		<action application="sleep" data="1000" />
+		<action application="answer" data="" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+</extension>
