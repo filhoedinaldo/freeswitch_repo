@@ -30,7 +30,7 @@ UP_DAY=$((${UP_SECONDS}/86400))
 UPTIME=`printf "%d day(s), %02dh%02dm%02ds" "$UP_DAY" "$UP_HOR" "$UP_MIN" "$UP_SEC"`
 
 # Lista de serviços e suas unidades systemd correspondentes
-# Lista de serviços do systemd e Docker
+# Lista de serviços do systemd e Docker, se for container adicionar uma terceira informação após o pipe |.
 SERVICES=(
     "PostgreSQL Main|postgresql@14-main.service"
     "PostgreSQL DB2|postgresql@14-db2.service"
@@ -105,7 +105,7 @@ check_docker_container() {
         #container_status="ERROR"
         echo "NOT INSTALLED"
     fi
-    #echo "$container_status"
+   
 }
 
 # get the load averages
@@ -139,32 +139,22 @@ for entry in "${SERVICES[@]}"; do
     service_type="${service_type_temp%%|*}"
     service_docker="${entry##*|}"
 
-    #if [ "$service_docker" == "container" ]; then
-    #    # Verificar o status do contêiner Docker
-    #    status=$(check_docker_container "$service_type")
-    #echo ""
-    #else
-        # Verificar o status do serviço systemd
-        service_unit="$service_type"
-        status_systemd=$(format_status "$service_unit")
-    #fi
-#echo -e "$service_docker"
+    service_unit="$service_type"
+    status_systemd=$(format_status "$service_unit")
+
 
     # Verificar se o status é "OK" ou "ERROR" antes de imprimir
     if [[ "$status_systemd" == "OK" || "$status_systemd" == "ERROR" ]]; then
         if [ "$status_systemd" == "OK" ]; then
-            #echo -e "${CYAN}${service_name} Status..........:${CYANB} [  ${GREEN}${status}${CYANB}  ]${OFF}"
             echo -e "  ${CYANB}[  ${GREEN}${status_systemd}${CYANB}  ] ${CYAN}${service_name} ${OFF}"
         else
-#           echo -e "$container_inspect"
-            #echo -e "${CYAN}${service_name} Status..........:${CYANB} [  ${RED}${status}${CYANB}  ]${OFF}"
             echo -e "  ${CYANB}[  ${RED}${status_systemd}${CYANB}  ] ${CYAN}${service_name} ${OFF}"
         fi
     fi
 done
 
 echo -e "  
-  ${WHITE}Status dos Serviços Docker"
+  ${WHITE}Status dos Serviços Docker:"
 
 ## Iterar sobre a lista de serviços e exibir apenas os que têm status "OK" ou "ERROR"
 for entry in "${SERVICES[@]}"; do
@@ -173,25 +163,14 @@ for entry in "${SERVICES[@]}"; do
     service_type_temp="${entry#*|}"
     service_type="${service_type_temp%%|*}"
     service_docker="${entry##*|}"
-
-    #if [ "$service_docker" == "container" ]; then
-        # Verificar o status do contêiner Docker
-        status_docker=$(check_docker_container "$service_type")
-    #else
-        # Verificar o status do serviço systemd
-        #service_unit="$service_type"
-        #status=$(format_status "$service_unit")
-    #fi
-#echo -e "$service_docker"
-
+   
+    status_docker=$(check_docker_container "$service_type")
+ 
     # Verificar se o status é "OK" ou "ERROR" antes de imprimir
     if [[ "$status_docker" == "OK" || "$status_docker" == "ERROR" ]]; then
         if [ "$status_docker" == "OK" ]; then
-            #echo -e "${CYAN}${service_name} Status..........:${CYANB} [  ${GREEN}${status}${CYANB}  ]${OFF}"
             echo -e "  ${CYANB}[  ${GREEN}${status_docker}${CYANB}  ] ${CYAN}${service_name} ${OFF}"
         else
-#           echo -e "$container_inspect"
-            #echo -e "${CYAN}${service_name} Status..........:${CYANB} [  ${RED}${status}${CYANB}  ]${OFF}"
             echo -e "  ${CYANB}[  ${RED}${status_docker}${CYANB}  ] ${CYAN}${service_name} ${OFF}"
         fi
     fi
