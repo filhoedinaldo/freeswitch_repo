@@ -1,0 +1,13 @@
+<extension name="Desvio_Not_Registred" continue="true" uuid="57232b4c-b396-48f1-83aa-6751d696057b">
+	<condition field="${user_exists}" expression="false" break="on-true" />
+	<condition field="destination_number" expression="^\d{4}$" >
+		<action application="export" data="registrado=${sofia_contact ${destination_number}@${domain_name}}" inline="true"/>
+	</condition>
+	<condition field="${registrado}" expression="error/user_not_registered" >
+		<action application="set" data="call_timeout=60" />
+		<action application="set" data="continue_on_fail=GATEWAY_DOWN,NORMAL_TEMPORARY_FAILURE" />
+		<action application="bridge" data="{absolute_codec_string=PCMU,PCMA}sofia/gateway/64423776-065c-46e0-814e-bacc85d1cb55/10600${destination_number}" />
+		<action application="log" data="{absolute_codec_string=PCMU,PCMA}sofia/gateway/97a77828-143e-4561-9c52-152cc5a78eb8/10600${destination_number}" />
+		<action application="log" data="${destination_number} XML SAIDA_PADRAO" />
+	</condition>
+</extension>
