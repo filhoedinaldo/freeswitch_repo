@@ -1,0 +1,11 @@
+<extension name="Entre_Dominios" continue="true" uuid="7e7436ea-6936-4d9a-a9dd-f3f158c2aeff">
+	<condition field="${domain_name}" expression="^(?!cptl2.voip.ufms.br).*"  />
+	<condition field="destination_number" expression="^(3400|37\d{2}|38\d{2})$" >
+		<action application="set" data="domain_name=cptl2.voip.ufms.br" />
+		<action application="set" data="domain=cptl2.voip.ufms.br" />
+		<action application="set" data="call_timeout=60" />
+		<action application="set" data="continue_on_fail=GATEWAY_DOWN,NORMAL_TEMPORARY_FAILURE" inline="true"/>
+		<action application="log" data="{absolute_codec_string=PCMU,PCMA}sofia/gateway/87d5d601-8766-412b-aef4-6511fb953e49/${destination_number}" />
+		<action application="transfer" data="${destination_number} XML cptl2.voip.ufms.br" />
+	</condition>
+</extension>
