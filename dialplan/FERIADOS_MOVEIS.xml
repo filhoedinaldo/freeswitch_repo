@@ -1,0 +1,24 @@
+<extension name="RH.CPCG_FERIADOS_MOVEIS" continue="true" uuid="0c6f5970-a101-4513-a636-687185222d2a">
+	<condition field="destination_number" expression="^(7292|7777)$"  />
+	<condition date-time="2024-02-12 00:00:00~2024-02-14 13:00:00"  break="on-true">
+		<action application="log" data="----------- Carnaval 2024 ---------------" />
+		<action application="answer" data="" />
+		<action application="sleep" data="1000" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+	<condition date-time="2024-03-29 00:00:00~2024-03-29 23:59:59"  break="on-true">
+		<action application="log" data="----------- Sexta-feira Santa 2024 ---------------" />
+		<action application="sleep" data="1000" />
+		<action application="answer" data="" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+	<condition date-time="2024-05-30 00:00:00~2024-05-30 23:59:59"  break="on-true">
+		<action application="log" data="----------- Corpus Christi ---------------" />
+		<action application="sleep" data="1000" />
+		<action application="answer" data="" />
+		<action application="playback" data="/opt/digivox/unity/unity-sip-server/var/lib/unity/recordings//cpcg.voip.ufms.br/URA_Feriado.wav" />
+		<action application="hangup" data="NORMAL_CLEARING" />
+	</condition>
+</extension>
