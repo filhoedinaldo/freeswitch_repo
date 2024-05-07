@@ -1,0 +1,1897 @@
+#!/bin/bash
+#
+# Copyright (C) 2022 DigiVox
+# File:            dgvx-install
+# Description:     Deploy a new DigiVox Unity/Citrus
+#
+# Initial version: Sthenley Macedo <sthenley.macedo@digivox.com.br>
+# Revision:        Andrio Campos <andrio.campos@digivox.com.br>
+# Initial date:    2022-05-31
+# Revision date:   2023-10-26
+# Version:         2.00
+#
+
+# -----------------------------------------------------------------------------
+#                              VARIABLES - SETUP
+# -----------------------------------------------------------------------------
+
+SCRIPT_VERSION="2.00"                        # Versão deste script
+CONF_FILE=${1}                               # Setup file full path # CONF_FILE="dgvx-install.Unity.conf"
+
+INSTALL_LOG="/opt/digivox/install.log"       # Arquivo de log da instalação
+
+TIME_FMT="+%H:%M:%S"                         # Formato de horário, aceito pelo comando date, para impressão na tela e email
+
+# Mail setup
+MAIL_REPORT=true                             # Reportar rotina com relatório por email. Se desabilitado, erros ainda são enviados por email. true/false
+SENDGRID_API_KEY=""                          # API key do sendgrid
+MAILER=0                                     # Solução de envio de email: 0=sendemail(GMail) 1=sendmail(local)(padrão) 2=sendgrid
+ENC_KEY="DigiVox!INFRA,2022#"                # Chave de encriptação
+
+MAIL_FILE="/tmp/dgvx-install.mail"           # Arquivo com listagem do conteudo final da pasta de backup
+MAIL_TO="infraestrutura@digivox.com.br, implantacao@digivox.com.br"
+MAIL_FROM="bot.infraestrutura@digivox.com.br"
+MAIL_NAME="Bot Infraestrutura e TI"
+# Senha encriptada
+MAIL_PW="U2FsdGVkX1/qvcsR63g+Z1HRLOBWCoi5cBV1GaoCC18="
+
+# -----------------------------------------------------------------------------
+#                                 FUNCTIONS
+# -----------------------------------------------------------------------------
+
+# Cumulate log file
+#
+function Do_log() {
+    echo -e "[$(date --rfc-3339=seconds)] ${*}" | sudo tee -a ${INSTALL_LOG} >/dev/null 2>&1
+}
+
+# Echo with timestamp
+#
+function Write() {
+    echo -e "${BWhite}[$(date "$TIME_FMT")]${Color_Off} $*"
+}
+
+# Echo with timestamp - No newline
+#
+function Write_no_newline() {
+    echo -ne "${BWhite}[$(date "$TIME_FMT")]${Color_Off} $*"
+}
+
+# Color - Boolean argument
+function CBoo() {
+    local color
+    $1 && color="${BGreen}Sim" || color="${BRed}Não"
+    echo -ne "${color}${Color_Off}"
+}
+
+# Color - String argument
+# $1 - String
+# $2 - 0=Red 1=Green
+function CText() {
+    local color="${Color_Off}"
+    [ "${2}" == "0" ] && color="${BRed}" 
+    [ "${2}" == "1" ] && color="${BGreen}"
+    echo -ne "${color}${1}${Color_Off}"
+}
+
+# Return boolean: validateIP "IP"
+function validateIP() {
+  if [[ $1 =~ ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$ ]]; then return 0; else return 1; fi
+
+  # if [[ $ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+
+  # local ip=$1
+  # local stat=1
+  # if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+  #       OIFS=$IFS
+  #       IFS='.'
+  #       ip=($ip)
+  #       IFS=$OIFS
+  #       [[ ${ip[0]} -le 255 && ${ip[1]} -le 255 \
+  #       && ${ip[2]} -le 255 && ${ip[3]} -le 255 ]]
+  #       stat=$?
+  # fi
+  # return $stat
+}
+
+# Return boolean: validateHostname "HOSTNAME"
+function validateHostname() {
+   if [[ $1 =~ ^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])$ ]]; then return 0; else return 1; fi
+}
+
+# -------------------------------
+function Setup_memcached () {
+  Write "● Instalando Memcached... "
+  sudo apt-get install -q -y memcached libmemcached-tools >/dev/null 2>&1
+  sudo sed -i /etc/memcached.conf -re "s/127.0.0.1/0.0.0.0/g" >/dev/null 2>&1
+  sudo sed -i /etc/memcached.conf -re "s/-m 64/-m ${MEMCACHED_MEM}/g" >/dev/null 2>&1
+  sudo systemctl enable memcached >/dev/null 2>&1 && (Do_log "Memcached instalado"; Mail_append "Memcached intalado<BR /> ")
+  sudo systemctl restart memcached >/dev/null 2>&1
+}
+
+# -------------------------------
+function Setup_ssh {
+  # SSHd...
+  Write "● Configurando SSH para porta ${BWhite}${SSH_PORT}${Color_Off}..."
+  sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.${BEXT}
+  sudo grep "^Port ${SSH_PORT}*" /etc/ssh/sshd_config >/dev/null 2>&1 || echo -e "\nPort ${SSH_PORT}" | sudo tee -a /etc/ssh/sshd_config >/dev/null 2>&1
+  sudo systemctl restart sshd && Do_log "SSH na porta ${SSH_PORT}"
+}
+
+# -------------------------------
+function Setup_redis {
+  Write "● Instalando Redis..."
+  sudo apt-get install -q -y redis-server > /dev/null 2>&1
+  sudo cp /etc/redis/redis.conf /etc/redis/redis.conf.${BEXT} >/dev/null 2>&1
+
+  sudo sed -i /etc/redis/redis.conf -re "s/bind 127.0.0.1 ::1/bind ${INTERNAL_IP} 172.17.0.1 127.0.0.1 ::1/g"
+  grep -q "After=network.target docker.service" /lib/systemd/system/redis-server.service || {
+    sudo sed -i /lib/systemd/system/redis-server.service -re "s/After=network.target/After=network.target docker.service/g" >/dev/null 2>&1
+    sudo sed -i /lib/systemd/system/redis-server.service -re "s/TimeoutStopSec=0/TimeoutStartSec=0\nTimeoutStopSec=0/g"
+    sudo systemctl daemon-reload
+  }
+
+  # https://severalnines.com/blog/performance-tuning-redis/
+  # https://iamabhishek-dubey.medium.com/redis-best-practices-and-performance-tuning-c48611488bbc
+  # https://www.digitalocean.com/community/tutorials/how-to-install-and-secure-redis-on-debian-10
+  # https://www.vultr.com/docs/install-and-configure-redis-on-debian-10/
+  # https://raazkumar.com/tutorials/redis-performance-tuning/
+  sudo sed -i /etc/redis/redis.conf -re "s/tcp-keepalive 300/tcp-keepalive 0/g"
+  sudo sed -i /etc/redis/redis.conf -re "s/^save/#save/g"
+  sudo sed -i /etc/redis/redis.conf -re "s/tcp-backlog 511/tcp-backlog 20480/g"
+  sudo sed -i /etc/redis/redis.conf -re "s/supervised no/supervised systemd/g"
+  
+  echo "madvise" | sudo tee -a /sys/kernel/mm/transparent_hugepage/enabled >/dev/null 2>&1
+
+  sudo bash -c "cat >/lib/systemd/system/disable-transparent-hugepage.service" <<'EOF'
+[Unit]
+Description=Disable Transparent Huge Pages (THP) for Redis
+Before=redis-server.service
+
+[Service]
+Type=exec
+ExecStart=/bin/sh -c 'echo madvise | tee /sys/kernel/mm/transparent_hugepage/enabled > /dev/null'
+
+[Install]
+WantedBy=multi-user.target
+
+EOF
+
+  sudo ln -sf /lib/systemd/system/disable-transparent-hugepage.service /etc/systemd/system/multi-user.target.wants/disable-transparent-hugepage.service >/dev/null 2>&1
+
+  sudo systemctl daemon-reload >/dev/null 2>&1
+  sudo systemctl enable disable-transparent-hugepage.service >/dev/null 2>&1
+  sudo systemctl start disable-transparent-hugepage.service >/dev/null 2>&1
+   
+  sudo systemctl enable redis-server >/dev/null 2>&1 && (Do_log "Redis instalado"; Mail_append "Redis intalado<BR /> ")
+  sudo systemctl restart redis-server >/dev/null 2>&1
+  #&& sudo systemctl status redis-server
+}
+
+# -------------------------------
+function Setup_docker {
+  Write "● Instalando Docker. Aguarde..."
+  # https://docs.docker.com/engine/install/debian/#install-using-the-repository
+  sudo usermod -aG suporte,sudo,docker digivox >/dev/null 2>&1
+  sudo apt-get -q -y install apt-transport-https ca-certificates >/dev/null 2>&1
+  sudo apt-get -q -y install ca-certificates curl gnupg lsb-release >/dev/null 2>&1
+  sudo mkdir -p /etc/apt/keyrings
+  curl -k -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg >/dev/null 2>&1
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian \
+  $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+  sudo apt-get -y -q update >/dev/null 2>&1
+  sudo apt-get -q -y install docker >/dev/null 2>&1
+  sudo apt-get -q -y update >/dev/null 2>&1
+  sudo apt-get -q -y install docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null 2>&1 || echo -e "● Docker install FAILED"
+  #sudo apt -y -q install dbus-user-session docker-ce docker-ce-cli containerd.io
+
+  sudo cp ${DPWD}/dgvx/docker.daemon.json.tpl /etc/docker/daemon.json
+  sudo systemctl enable docker >/dev/null 2>&1 && (Do_log "Docker instalado"; Mail_append "Docker intalado<BR /> ")
+  sudo systemctl restart docker >/dev/null 2>&1
+
+  # Service ordering...
+  sudo sed -i /lib/systemd/system/docker.service -re "s/firewalld.service containerd.service/firewalld.service containerd.service sipserver.service/g"
+  sudo systemctl daemon-reload
+
+  Write "● Preparando repositório Docker..."
+  # https://docs.docker.com/engine/reference/commandline/login/#credentials-store
+  echo "${DOCKER_REPO_PW}" | sudo docker login -u ${DOCKER_REPO_LOGIN} --password-stdin docker.io >/dev/null 2>&1
+  sudo cp /root/.docker/config.json /etc/docker/
+  sudo chmod 644 /etc/docker/config.json
+}
+
+# -------------------------------
+function Setup_zabbix {
+  # AQUI
+  # Mapear tunning e métricas específicas
+  Write "● Instalando Zabbix Agent..."
+  sudo apt-get install -y -q zabbix-agent >/dev/null 2>&1
+  sudo cp /etc/zabbix/zabbix_agentd.conf /etc/zabbix/zabbix_agentd.conf.${BEXT}
+
+  sudo sed -i /etc/zabbix/zabbix_agentd.conf -re "s/# Hostname=/Hostname=${HOSTNAME}/g"
+  sudo sed -i /etc/zabbix/zabbix_agentd.conf -re "s/Server=127.0.0.1/Server=${ZABBIX_SERVER}/g"
+  sudo sed -i /etc/zabbix/zabbix_agentd.conf -re "s/ServerActive=127.0.0.1/ServerActive=${ZABBIX_SERVER}/g"
+  sudo sed -i /etc/zabbix/zabbix_agentd.conf -re "s/# HostMetadataItem=/HostMetadataItem=system.uname/g"
+
+  sudo systemctl enable zabbix-agent >/dev/null 2>&1 && (Do_log "Zabbix instalado"; Mail_append "Zabbix intalado<BR /> ")
+  sudo systemctl restart zabbix-agent >/dev/null 2>&1
+}
+
+# -------------------------------
+function Setup_vpn {
+  Write_no_newline "● Instalando OpenVPN client. Aguarde... "
+  sudo apt-get -y -q install openvpn >/dev/null 2>&1
+  #sudo unzip ${VPN_CLIENT_FILES} -d /etc/openvpn/
+  sudo tar -zxf ${VPN_CLIENT_FILES} -C /etc/openvpn/
+  sudo chown root:root /etc/openvpn/*
+  sudo chmod 600 /etc/openvpn/*.pem
+
+  sudo sed -i /etc/openvpn/digivox-client.conf -re "s/;cipher x/cipher BF-CBC/g"
+  sudo sed -i /etc/openvpn/digivox-client.conf -re "s/remote  177.43.234.148 1194/remote  vpn2.digivox.com.br 1194/g"
+  # AQUI Para o caso de acesso a todas as as redes da VPN
+  # route 192.168.230.0 255.255.255.0
+  # route 192.168.231.0 255.255.255.0
+  # route 192.168.101.0 255.255.255.0
+  # route 192.168.234.0 255.255.255.0
+  # route 192.168.236.0 255.255.255.0
+  # route 172.20.50.0 255.255.255.0
+  # route 172.20.51.0 255.255.255.0
+  # route 10.51.91.0 255.255.255.0
+  # route 10.10.60.0 255.255.255.0
+  # route 177.170.20.165 255.255.255.255
+  # route 179.125.169.191 255.255.255.255
+  # route 192.168.86.0 255.255.255.0
+  # route 10.10.2.0 255.255.255.0
+  # route 10.20.20.0 255.255.255.0
+
+  sudo systemctl enable openvpn >/dev/null 2>&1
+  sudo systemctl restart openvpn >/dev/null 2>&1
+
+  sudo openvpn --config digivox-client.conf --daemon >/dev/null 2>&1
+  sudo systemctl enable openvpn@digivox-client >/dev/null 2>&1 && (Do_log "openvpn@digivox-client instalado"; Mail_append "openvpn@digivox-client instalado<BR /> ")
+  sudo systemctl restart openvpn@digivox-client >/dev/null 2>&1
+
+  echo -n "Aguardando 5 segundos... "; sleep 5
+  VPN_IP="$(sudo ifconfig tun0 2>/dev/null | awk -F ' +' '/inet /{print $3}')"
+  echo -e "VPN IP: ${BWhite}${VPN_IP}${Color_Off}"
+  Do_log "VPN IP: ${VPN_IP}"; Mail_append "VPN IP: ${VPN_IP}<BR /> " 
+}
+
+# -------------------------------
+function Setup_keepalived {
+  Write "● Instalando Keepalived..."
+
+  [ ! "${INTERNAL_IP}" == "${CURRENT_IP}" ] && {
+    VIP_DEV=$(sudo ip r | grep ${CURRENT_IP} | cut -d" " -f3)
+    echo -e "   ${BWhite}ATENÇÃO${Color_Off}: IP atual (${CURRENT_IP}) é diferente do que será configurado no software (${INTERNAL_IP})"
+    echo "   Device do keepalived configurado para ${VIP_DEV}"
+  } || VIP_DEV=$(sudo ip r | grep ${INTERNAL_IP} | cut -d" " -f3)
+
+  sudo apt-get install -q -y keepalived >/dev/null 2>&1
+
+  sudo cp ${DPWD}/dgvx/keepalived.conf.tpl /etc/keepalived/keepalived.conf
+
+  sudo sed -i /etc/keepalived/keepalived.conf -re "s/VIP_IP/${VIP_IP}/g"
+  sudo sed -i /etc/keepalived/keepalived.conf -re "s/VIP_MASK/${VIP_MASK}/g"
+  sudo sed -i /etc/keepalived/keepalived.conf -re "s/VIP_DEV/${VIP_DEV}/g"
+  sudo sed -i /etc/keepalived/keepalived.conf -re "s/VIP_PW/${VIP_PW}/g"
+  sudo sed -i /etc/keepalived/keepalived.conf -re "s/VIP_PRIORITY/${VIP_PRIORITY}/g"
+  sudo sed -i /etc/keepalived/keepalived.conf -re "s/VIP_STATE/${VIP_STATE}/g"
+
+  sudo systemctl enable keepalived >/dev/null 2>&1 && (Do_log "Keepalived instalado"; Mail_append "Keepalived instalado<BR /> " )
+  sudo systemctl start keepalived >/dev/null 2>&1
+}
+
+function Setup_sipserver {
+
+  Write "● Instalando Unity SIP Server. DEVE levar alguns minutos. Aguarde..."
+  #sudo apt-get -y update && sudo apt-get install -y gnupg2
+  sudo wget --no-check-certificate --http-user=signalwire --http-password=${FS_TOKEN} -O /usr/share/keyrings/signalwire-freeswitch-repo.gpg https://freeswitch.signalwire.com/repo/deb/debian-release/signalwire-freeswitch-repo.gpg >/dev/null 2>&1
+
+  echo "machine freeswitch.signalwire.com login signalwire password ${FS_TOKEN}" | sudo tee /etc/apt/auth.conf >/dev/null 2>&1
+  echo "deb [signed-by=/usr/share/keyrings/signalwire-freeswitch-repo.gpg] https://freeswitch.signalwire.com/repo/deb/debian-release/ $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/freeswitch.list >/dev/null 2>&1
+  echo "deb-src [signed-by=/usr/share/keyrings/signalwire-freeswitch-repo.gpg] https://freeswitch.signalwire.com/repo/deb/debian-release/ $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/freeswitch.list >/dev/null 2>&1
+
+  sudo apt-get -q -y update >/dev/null 2>&1
+  #sudo apt-get -q -y install freeswitch-meta-all >/dev/null 2>&1
+  sudo apt -q -y build-dep freeswitch-meta-all >/dev/null 2>&1
+
+  #UNITY_BIN_FILE="${UNITY_BIN}"
+  #wget ${UNITY_BIN_URL} -O unity-sip-server.tar.gz
+  Write "● Descompactando Unity/${UNITY_BIN}..."
+  # AQUI
+  # Packs...
+  sudo tar --overwrite -zxf Unity/${UNITY_BIN} -C /opt/digivox/unity/
+  #sudo mv /opt/digivox/unity/unity-sip-server/share/unity/sounds /opt/digivox/unity/unity-sip-server/share/unity/sounds-old
+  #sudo tar -zxf unity_sounds.tar.gz -C /opt/digivox/unity/unity-sip-server/share/unity/
+  sudo rm -rf /opt/digivox/unity/unity-sip-server/share/unity/sounds
+  Write "● Descompactando pacote Unity: áudio..."
+  (sudo tar -zxf Unity/unity_sounds.tar.gz -C /) &>/dev/null
+  Write "● Descompactando pacote Unity: scripts..."
+  sudo tar -zxf Unity/unity_scripts.tar.gz -C /opt/digivox/unity/unity-sip-server/share/unity/
+
+  sudo ln -s /opt/digivox/unity/unity-sip-server/bin/unity /usr/bin/unity
+  sudo ln -s /opt/digivox/unity/unity-sip-server/bin/fs_cli /usr/bin/unity_cli
+  sudo ln -s /opt/digivox/unity/unity-sip-server/share/unity/ /usr/share/unity
+  sudo ln -s /opt/digivox/unity/unity-sip-server/var/lib/unity/ /var/lib/unity
+  sudo ln -s /opt/digivox/unity/unity-sip-server/var/log/unity/ /var/log/unity
+
+  # sudo systemctl disable freeswitch >/dev/null 2>&1
+  # sudo systemctl stop freeswitch >/dev/null 2>&1
+
+  Write "● Configurando arquivos do Unity SIP Server... "
+  sudo sed -i /opt/digivox/unity/unity-sip-server/share/unity/scripts/resources/config.lua -re "s/hostaddr=172.20.50.84/hostaddr=${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/share/unity/scripts/resources/config.lua -re "s/hostaddr=10.10.0.154/hostaddr=${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/share/unity/scripts/resources/config.lua -re "s/hostaddr=172.20.50.87/hostaddr=${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/share/unity/scripts/resources/config.lua -re "s/hostaddr=10.10.0.154/hostaddr=${INTERNAL_IP}/g"
+  #
+  sudo sed -i /opt/digivox/unity/unity-sip-server/share/unity/scripts/resources/config.lua -re "s/port=5432 dbname=unity_sip/port=5433 dbname=unity_sip/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/share/unity/scripts/resources/config.lua -re "s/port=5432 dbname=unity_log/port=5433 dbname=unity_log/g"
+  #
+  sudo sed -i /opt/digivox/unity/unity-sip-server/etc/unity/vars.xml -re "s/hostaddr=172.20.50.84/hostaddr=${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/etc/unity/vars.xml -re "s/local_ip_v4=172.20.50.80/local_ip_v4=${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/etc/unity/vars.xml -re "s/port=5432 dbname=unity_sip/port=5433 dbname=unity_sip/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/etc/unity/vars.xml -re "s/user=postgresq /user=postgres /g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/etc/unity/vars.xml -re "s/external_rtp_ip=172.20.50.80/external_rtp_ip=${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/etc/unity/vars.xml -re "s/external_sip_ip=172.20.50.80/external_sip_ip=${INTERNAL_IP}/g"
+  #
+  sudo sed -i /opt/digivox/unity/unity-sip-server/etc/unity/autoload_configs/verto.conf.xml -re "s/172.20.50.80/${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/etc/unity/autoload_configs/verto.conf.xml -re "s/187.72.201.32/${EXTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/etc/unity/autoload_configs/verto.conf.xml -re "s/172.20.50.0\/24/${INTERNAL_IP}\/${INTERNAL_MASK}/g"
+  #
+  sudo sed -i /opt/digivox/unity/unity-sip-server/share/unity/scripts/unity/sip_push_notification.lua -re "s/172.20.50.76/${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/share/unity/scripts/unity/sip_push_notification.lua -re "s/hostaddr=172.20.50.84/hostaddr=${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/share/unity/scripts/unity/sip_push_notification.lua -re "s/application_name='unity_core'/application_name='unity'/g"
+  # AQUI...
+  #application_name='sip'"/-->
+  #
+  sudo sed -i /opt/digivox/unity/unity-sip-server/share/unity/scripts/app/ring_groups/index.lua -re "s/172.20.50.76/${INTERNAL_IP}/g"
+
+  sudo sed -i /opt/digivox/unity/unity-sip-server/etc/unity/autoload_configs/event_socket.conf.xml -re "s/D1g1v0xUn1ty/${UNITY_SS_PW}/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/etc/unity/autoload_configs/switch.conf.xml -re "s/name=\"switchname\" value=\"unity\"/name=\"switchname\" value=\"${HOSTNAME}\"/g"
+
+  # AQUI...
+  sudo cp Unity/index.lua /opt/digivox/unity/unity-sip-server/share/unity/scripts/app/hangup/index.lua
+  sudo cp Unity/opus.conf.xml /opt/digivox/unity/unity-sip-server/etc/unity/autoload_configs/
+
+  #-----------------------------
+  Write "● Configurando daemon Unity SIP Server..."
+  sudo cp ${DPWD}/dgvx/sipserver.service.tpl /lib/systemd/system/sipserver.service 
+
+  sudo ln -sf /lib/systemd/system/sipserver.service /etc/systemd/system/multi-user.target.wants/sipserver.service >/dev/null 2>&1
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable sipserver >/dev/null 2>&1 && (Do_log "SIP Server instalado"; Mail_append "SIP Server instalado<BR /> " )
+
+  Write_no_newline "● Reiniciando SIP Server..."
+  sudo systemctl restart sipserver > /dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  x=0; M=("▖" "▘" "▝" "▗" "▉")
+  echo -ne "\r   * Aguardando 90 segundos de propósito... "
+  for i in {0..90}; do
+    [ ${x} -eq 4 ] && x=0
+    echo -en "\r   * Aguardando 90 segundos de propósito... [${M[$x]}]              "; let x++
+    sleep 1
+  done
+  echo -en "\r   * Aguardando 90 segundos de propósito... [${M[4]}]\n              "; 
+
+}
+
+# -------------------------------
+function Setup_unity_integration_server {
+  Write "● Instalando Unity Integration Server..."
+  sudo cp ${DPWD}/dgvx/unity-integration-server.conf.tpl /opt/digivox/unity/unity-integration-server.conf
+
+  sudo sed -i /opt/digivox/unity/unity-integration-server.conf -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity-integration-server.conf -re "s/UNITY_PGSQL_USER/${UNITY_PGSQL_USER}/g"
+  sudo sed -i /opt/digivox/unity/unity-integration-server.conf -re "s/UNITY_PGSQL_PW/${UNITY_PGSQL_PW}/g"
+  sudo sed -i /opt/digivox/unity/unity-integration-server.conf -re "s/UNITY_PGSQL_PRIMARY_IP/${UNITY_PGSQL_PRIMARY_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity-integration-server.conf -re "s/5432\/unity_log/5433\/unity_log/g"
+
+  # Container Unity Integration Server
+  sudo cp ${DPWD}/dgvx/dgvx-container-unity-integration-server-new.tpl /opt/digivox/docker-scripts/dgvx-container-unity-integration-server-new
+  Write_no_newline "● Container Unity Integration Server. Aguarde..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-integration-server-new -re "s/UNITY_TAG_INTEGRATION/${UNITY_TAG_INTEGRATION}/g"
+  #sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-integration-server-new -re "s/TIMEZONE/${TIMEZONE}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-integration-server-new -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-unity-integration-server-new
+  sudo /opt/digivox/docker-scripts/dgvx-container-unity-integration-server-new  >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+  Do_log "Container Unity Integration Server"; Mail_append "Container Unity Integration Server<BR /> "
+  sudo chgrp suporte /opt/digivox/docker-scripts/*
+
+  # Service ordering... #AQUI?
+  # Write "● Reiniciando o serviço Docker..."
+  # sudo systemctl restart docker >/dev/null 2>&1
+}
+
+# -------------------------------
+function Setup_unity_manager {
+  # unity.conf é exclusivo do Manager
+  Write_no_newline "● Instalando Unity Manager... "
+  
+  sudo cp ${DPWD}/dgvx/unity.conf.tpl /opt/digivox/unity/unity.conf
+  sudo chmod 644 /opt/digivox/unity/unity.conf
+
+  sudo sed -i /opt/digivox/unity/unity.conf -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity.conf -re "s/UNITY_REDIS/${UNITY_REDIS}/g"
+  sudo sed -i /opt/digivox/unity/unity.conf -re "s/UNITY_PGSQL_USER/${UNITY_PGSQL_USER}/g"
+  sudo sed -i /opt/digivox/unity/unity.conf -re "s/UNITY_PGSQL_PW/${UNITY_PGSQL_PW}/g"
+  sudo sed -i /opt/digivox/unity/unity.conf -re "s/UNITY_PGSQL_PRIMARY_IP/${UNITY_PGSQL_PRIMARY_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity.conf -re "s/5432\/unity_log/5433\/unity_log/g"
+
+  $SETUP_UNITY_CHAT && {
+    sudo sed -i /opt/digivox/unity/unity.conf -re "s/database.chat.app.evolutions.autoApply=false/database.chat.app.evolutions.autoApply=true/g"
+    echo "Chat habilitado"
+    Do_log "Unity Chat habilitado"; Mail_append "Unity Chat habilitado<BR /> " 
+  } || { 
+    echo "Chat desabilitado"
+    Do_log "Unity Chat desabilitado"; Mail_append "Unity Chat desabilitado<BR /> "
+  }
+
+  # Container Unity Manager
+  sudo cp ${DPWD}/dgvx/dgvx-container-unity.tpl /opt/digivox/docker-scripts/dgvx-container-unity
+  Write_no_newline "● Container Unity Manager. Aguarde... "
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity -re "s/UNITY_TAG_MANAGER/${UNITY_TAG_MANAGER}/g"
+  #sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity -re "s/TIMEZONE/${TIMEZONE}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-unity
+  sudo /opt/digivox/docker-scripts/dgvx-container-unity  >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+  Do_log "Container Unity Manager"; Mail_append "Container Unity Manager<BR /> "
+  sudo chgrp suporte /opt/digivox/docker-scripts/*
+
+  sudo docker restart unity >/dev/null 2>&1
+  sudo docker restart unity-integration-server-new >/dev/null 2>&1
+
+  # Waiting for current SQL migration (first time)
+  MIGRATION=${UNITY_TAG_MANAGER: -2}
+  Write_no_newline "   * Aguardando migration ${MIGRATION} da base unity_log... "
+
+  # AQUI (se não for DB local? E o user?)
+  SQL_TEST="sudo -iu postgres psql -U postgres -p5433 -d unity_log -Atc \"select version from flyway_schema_history where version = '${MIGRATION}';\" -P pager=off 2>/dev/null" 
+  SQL_COUNT=0
+  M=("▖" "▘" "▝" "▗" "▉"); x=0
+  while [ ! "${MIGRATION}" == "$(eval ${SQL_TEST})" ]
+  do
+    let SQL_COUNT++
+    [ ${x} -eq 4 ] && x=0; 
+    echo -ne "\r   * Aguardando migration ${MIGRATION} da base unity_log... [${M[$x]}]        "; let x++
+    sleep 1
+    if [ $SQL_COUNT -eq 180 ]; then
+       echo -n " Tempo limite de 3 minutos atingido"
+       break
+    fi
+  done
+  echo -e "\r   * Aguardando migration ${MIGRATION} da base unity_log... [${M[4]}]        "; 
+
+ }
+
+# -------------------------------
+function Setup_nginx {
+
+  Write_no_newline "● Instalando NGINX. Aguarde... "
+  sudo apt-get -q -y install nginx >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  sudo cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.${BEXT}
+
+  sudo systemctl enable nginx  >/dev/null 2>&1
+
+  # sudo sed -i /etc/nginx/sites-available/unity -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  # sudo sed -i /etc/nginx/sites-available/unity -re "s/VIP_IP/${VIP_IP}/g"
+  ## sudo ln -sf /etc/nginx/sites-available/unity /etc/nginx/sites-enabled/unity
+  # sudo ln -s /etc/nginx/sites-available/unity /etc/nginx/sites-enabled/
+  # sudo systemctl enable nginx >/dev/null 2>&1 && (Do_log "Nginx/Provisioning instalado"; Mail_append "Nginx/Provisioning instalado<BR /> " )
+  # sudo nginx -t >/dev/null 2>&1 && sudo nginx -s reload >/dev/null 2>&1
+}
+
+# -------------------------------
+function Setup_unity_provisioning {
+
+  Write "● Instalando Unity Provisioning. Aguarde..."
+  echo "deb https://packages.sury.org/php/ bullseye main" | sudo tee /etc/apt/sources.list.d/php.list >/dev/null 2>&1
+  sudo wget --no-check-certificate -O /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg >/dev/null 2>&1
+  sudo apt-get -q -y update >/dev/null 2>&1
+
+  Write_no_newline "● Instalando PHP 7.3 para o Provisoning. Aguarde... "
+  # sudo apt-get -q -y install nginx nginx-common nginx-core \
+  #     php7.3 php7.3-cli php7.3-common php7.3-fpm php7.3-json \
+  #     php7.3-opcache php7.3-pgsql php7.3-readline php7.3-xml php7.3-zip >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  sudo apt-get -q -y install php7.3 php7.3-cli php7.3-common php7.3-fpm php7.3-json php7.3-memcached \
+      php7.3-opcache php7.3-pgsql php7.3-readline php7.3-xml php7.3-zip >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  sudo tar -P -zxf Unity/unity_var_www.tar.gz -C / 2>/dev/null && (Do_log "Provisioning HTDOCS"; Mail_append "Provisioning HTDOCS<BR /> " )
+  sudo cp /var/www/unity/themes/default/favicon.ico /usr/share/nginx/html/favicon.ico >/dev/null 2>&1
+
+  sudo tar -P -zxf Unity/device_t30p.tar.gz -C /var/www/unity/resources/templates/provision/yealink/ 2>/dev/null && (Do_log "Provisioning Device t30p"; Mail_append "Provisioning Device t30p<BR /> " )
+  sudo chown -R www-data:www-data /var/www/unity/resources/templates/provision/yealink/t30p
+
+  # /etc/php/7.3/fpm/pool.d/www.conf
+  # listen.owner = www-data
+  # listen.group = www-data
+  # user = www-data
+  # group = www-data
+
+  sudo cp ${DPWD}/dgvx/nginx-unity-provisioning.tpl /etc/nginx/sites-available/unity
+
+  # AQUI 
+  # /etc/php/7.3/fpm/pool.d/www.conf
+  #;listen = /run/php/php7.3-fpm.sock
+  #listen = 10.102.30.19:9000
+  #/usr/local/sbin/notify-keepalived.sh
+
+  sudo sed -i /etc/nginx/sites-available/unity -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  sudo sed -i /etc/nginx/sites-available/unity -re "s/VIP_IP/${VIP_IP}/g"
+  sudo ln -sf /etc/nginx/sites-available/unity /etc/nginx/sites-enabled/unity
+  sudo systemctl enable nginx >/dev/null 2>&1 && (Do_log "Nginx/Provisioning instalado"; Mail_append "Nginx/Provisioning instalado<BR /> " )
+  sudo nginx -t >/dev/null 2>&1 && sudo nginx -s reload >/dev/null 2>&1
+}
+
+# -------------------------------
+function Setup_dns {
+  Write_no_newline "● Instalando Bind9... "
+  sudo apt-get -q -y install bind9 bind9utils bind9-doc dnsutils >/dev/null 2>&1
+  sudo systemctl enable named  > /dev/null 2>&1
+
+  # Falta de IPv6 dá bronca no Unity
+  #sudo cp /etc/bind/named.conf.options /etc/bind/named.conf.options.${BEXT}
+  #sudo cp /etc/default/named /etc/default/named.${BEXT}
+  #sudo sed -i /etc/bind/named.conf.options -re "s/listen-on-v6 \{ any;/listen-on-v6 \{ none;/g"
+  #sudo sed -i /etc/default/named -re "s/OPTIONS=\"-u bind\"/OPTIONS=\"-4 -u bind\"/g"
+
+  INT_NET="${INTERNAL_NETWORK%/*}"
+  REV_NET="${INT_NET%.0}"; REV_NET="${REV_NET%.0}"; 
+  REV_NET="${REV_NET%.0}"
+
+  # AQUI VIP_IP2
+  sudo bash -c "cat >/etc/bind/named.conf.local" <<'EOF'
+zone "DNS_DOMAIN" {
+    type master;
+    file "/etc/bind/db.DNS_DOMAIN"; # zone file path
+    #allow-transfer { VIP_IP2; };           # ns2 private IP address - secondary
+};
+
+zone "DNS_REV_NET.in-addr.arpa" {
+    type master;
+    file "/etc/bind/db.DNS_REV_NET";  # DNS_NETWORK/DNS_NETWORK_MASK subnet
+    #allow-transfer { VIP_IP2; };  # ns2 private IP address - secondary
+};
+
+EOF
+
+  sudo sed -i /etc/bind/named.conf.local -re "s/DNS_DOMAIN/${DNS_DOMAIN}/g"
+  sudo sed -i /etc/bind/named.conf.local -re "s/DNS_NETWORK_MASK/${INTERNAL_MASK}/g"
+  sudo sed -i /etc/bind/named.conf.local -re "s/DNS_NETWORK/${INT_NET}/g"
+  sudo sed -i /etc/bind/named.conf.local -re "s/DNS_REV_NET/${REV_NET}/g"
+
+  sudo bash -c "cat >/etc/bind/db.${DNS_DOMAIN}" <<'EOF'
+;
+; BIND data file for local loopback interface
+;
+$TTL    604800
+@       IN      SOA     DNS_DOMAIN. root.DNS_DOMAIN. (
+                              2         ; Serial
+                        604800         ; Refresh
+                          86400         ; Retry
+                        2419200         ; Expire
+                        604800 )       ; Negative Cache TTL
+
+;@       IN      NS      DNS_DOMAIN.
+      IN      NS      DNS_DOMAIN.
+;@       IN      A       VIP_IP
+
+DNS_DOMAIN.   IN      A       VIP_IP
+
+EOF
+
+PTR_IP="${INTERNAL_IP#"$REV_NET"}"
+PTR_IP=$(printf '%s.' "$PTR_IP" | tac -s.) # Inverted
+PTR_IP="${PTR_IP%.}"; PTR_IP="${PTR_IP%.}"; PTR_IP="${PTR_IP%.}"
+
+sudo bash -c "cat >/etc/bind/db.${REV_NET}" <<'EOF'
+;
+; BIND data file for local loopback interface
+;
+$TTL    604800
+@       IN      SOA     DNS_DOMAIN. root.DNS_DOMAIN. (
+                              3         ; Serial
+                        604800         ; Refresh
+                          86400         ; Retry
+                        2419200         ; Expire
+                        604800 )       ; Negative Cache TTL
+
+;@       IN      NS      DNS_DOMAIN.
+      IN      NS      DNS_DOMAIN.
+
+DNS_PTR     IN      PTR       DNS_DOMAIN.
+EOF
+  
+  sudo sed -i /etc/bind/db.* -re "s/DNS_DOMAIN/${DNS_DOMAIN}/g"
+  sudo sed -i /etc/bind/db.* -re "s/VIP_IP/${VIP_IP}/g"
+  sudo sed -i /etc/bind/db.* -re "s/DNS_PTR/${PTR_IP}/g"
+  sudo chown root:bind /etc/bind/db.*
+  # Testando conf
+  sudo named-checkconf && echo -e "Configuração de DNS ${OK}!" || echo -e "${FAIL} na configuração de DNS!"
+  sudo named-checkzone ${DNS_DOMAIN} /etc/bind/db.${DNS_DOMAIN}  >/dev/null && echo -en "             Zona DNS ${OK}! ${BCyan}${DNS_DOMAIN}${Color_Off} " || echo -en "             ${FAIL} na Zona DNS! (db.${DNS_DOMAIN}) "
+  sudo named-checkzone ${REV_NET}.in-addr.arpa /etc/bind/db.${REV_NET}  >/dev/null && echo -e "Zona reversa ${OK}! (db.${REV_NET})" || echo -e "${FAIL} na Zona reversa! (db.${REV_NET})"
+
+  echo -e "\n${VIP_IP} ${DNS_DOMAIN}" | sudo tee -a /etc/hosts >/dev/null 2>&1
+  #echo -e "nameserver ${INTERNAL_IP}" | sudo tee -a /etc/resolv.conf >/dev/null 2>&1
+  # First line
+  sudo cp /etc/resolv.conf /etc/resolv.conf.${BEXT}
+  sudo sed -i "1 i\nameserver ${INTERNAL_IP}" /etc/resolv.conf
+
+  sudo systemctl restart bind9 >/dev/null 2>&1 && (Do_log "DNS instalado"; Mail_append "DNS instalado<BR /> " )
+}
+
+# -------------------------------
+function Setup_postgres {
+  # 2022-05-31 v14
+  Write_no_newline "● Instalando PostgreSQL. Aguarde... "
+  echo -e " deb http://apt.postgresql.org/pub/repos/apt/ bullseye-pgdg main" | tee -a /etc/apt/sources.list.d/pgdg.list
+  wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+  sudo apt update
+  sudo apt-get -q -y install postgresql-14 >/dev/null 2>&1 || echo -e "● postgres install FAILED"
+
+  #PSQL_DB1_DATA_DIR=$(sudo -u postgres psql template1 -p 5432 -Atc "SHOW data_directory;" -P pager=off)
+  PSQL_DB1_DATA_DIR="/var/lib/postgresql/14/main"
+  PSQL_DB1_ETC_DIR="/etc/postgresql/14/main/"
+
+  sudo cp -p ${PSQL_DB1_ETC_DIR}/postgresql.conf ${PSQL_DB1_ETC_DIR}/postgresql.conf.${BEXT}
+  sudo cp -p ${PSQL_DB1_ETC_DIR}/pg_hba.conf ${PSQL_DB1_ETC_DIR}/pg_hba.conf.${BEXT}
+  echo -en "(v14? OUT/2022) "; sudo -iu postgres psql -V
+
+  sudo -u postgres psql -p 5432 -Atc "alter user ${PGSQL_USER} with encrypted password '${PGSQL_PW}';"  -P pager=off >/dev/null
+  sudo -u postgres createdb unity_core
+  sudo -u postgres createdb unity
+  # Warning! Populate only unity_core
+  sudo -u postgres psql -p 5432 -q -d unity_core -f ${DPWD}/Unity/${UNITY_DB_CORE} >/dev/null
+
+  echo "host    all             all             ${INTERNAL_NETWORK}          md5" | sudo tee -a ${PSQL_DB1_ETC_DIR}/pg_hba.conf >/dev/null 2>&1
+  #echo "host    replication     replicador      ${INTERNAL_NETWORK}          trust" | sudo tee -a ${PSQL_DB1_ETC_DIR}/pg_hba.conf >/dev/null 2>&1
+  echo "host    replication     replicador      ${INTERNAL_NETWORK}          md5" | sudo tee -a ${PSQL_DB1_ETC_DIR}/pg_hba.conf >/dev/null 2>&1
+  echo "host    all             all             172.17.0.0/16            md5" | sudo tee -a ${PSQL_DB1_ETC_DIR}/pg_hba.conf >/dev/null 2>&1
+
+  sudo -u postgres psql -p 5432 -Atc "alter user ${PGSQL_USER} with encrypted password '${PGSQL_PW}';"  -P pager=off >/dev/null
+  sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#listen_addresses = 'localhost'/listen_addresses = '*'/g"
+  sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/max_connections = 100/max_connections = 1500/g"
+  sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/shared_buffers = 128MB/shared_buffers = 256MB/g"
+  sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/work_mem = 4MB/work_mem = 32MB/g"
+  sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#maintenance_work_mem = 64MB/maintenance_work_mem = 128MB/g"
+  sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#max_stack_depth = 2MB/max_stack_depth = 6MB/g"
+  sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#deadlock_timeout = 1s/deadlock_timeout = 10s/g"
+
+  # REPLICATION...
+  # https://gist.github.com/kpirliyev/c840e32df1619ab5875911286521c75b
+  # https://www.postgresql.org/docs/14/runtime-config-replication.html
+  # https://stackoverflow.com/questions/44210846/postgres-pg-basebackup-cant-find-pg-pass-file
+  # https://www.digitalocean.com/community/tutorials/how-to-set-up-physical-streaming-replication-with-postgresql-12-on-ubuntu-20-04
+  # https://www.highgo.ca/2021/02/03/how-to-setup-postgres-14-wal-streaming-replication-on-ubuntu-18-04/
+
+  if $SETUP_REPLICA; then
+    # REPLICA...
+    Write "● Configurando DB1 como ${BBlue}Secundário/Réplica${Color_Off}..."
+    #sudo -u postgres psql template1 -p 5432 -Atc "CREATE USER replicador REPLICATION;" -P pager=off
+    sudo -u postgres psql template1 -p 5432 -Atc "CREATE ROLE replicador WITH REPLICATION PASSWORD '${PGSQL_RPL_PW}' LOGIN;" -P pager=off >/dev/null 2>&1
+
+    sudo systemctl stop postgresql@14-main
+    sudo rm -rf ${PSQL_DB1_DATA_DIR}
+    sudo -u postgres mkdir ${PSQL_DB1_DATA_DIR}
+    sudo -u postgres chmod 700 ${PSQL_DB1_DATA_DIR}
+
+    #echo "host    replication     replicador      ${INTERNAL_NETWORK}          trust" | sudo tee -a ${PSQL_DB1_ETC_DIR}/pg_hba.conf
+    # local   replication     all                       md5
+    # host    replication   all   172.16.214.167/24   md5
+    # host    replication   all   ::1/128             md5
+
+    #echo "${PGSQL_PRIMARY_IP}:5432:*:postgres:${PGSQL_PW}" | sudo -iu postgres tee -a /var/lib/postgresql/.pgpass
+    echo "${PGSQL_PRIMARY_IP}:5432:replication:replicador:${PGSQL_RPL_PW}" | sudo -iu postgres tee -a /var/lib/postgresql/.pgpass >/dev/null 2>&1
+    sudo chmod 0600 /var/lib/postgresql/.pgpass
+    
+    # Somente na réplcia?
+    sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#hot_standby = on/hot_standby = on/g"
+
+    Write "● Copiando bases de - Criando réplica do Db1 (5432)..."
+    # sudo -u postgres pg_basebackup --pgdata=${PSQL_DB1_DATA_DIR} --format=p --write-recovery-conf --checkpoint=fast --label=mffb --progress --host=${PGSQL_PRIMARY_IP} --port=5432 --username=replicador
+    # sudo -u postgres pg_basebackup -h ${PGSQL_PRIMARY_IP} -p 5432 -U replicador -D ${PSQL_DB1_DATA_DIR}/ -Fp -Xs -R
+    sudo -u postgres pg_basebackup -PvR -D ${PSQL_DB1_DATA_DIR} -h ${PGSQL_PRIMARY_IP} -U replicador -p 5432
+    #--slot=slot_replication --wal-method=stream
+    #--dbname='host=xxx.xx.xx.xxx port=5432 user=replicacao password=xxxxx'
+    sudo systemctl enable postgresql@14-main && (Do_log "PostgreSQL DB1 secundário instalado"; Mail_append "PostgreSQL DB1 secundário instalado<BR /> " )
+    sudo systemctl restart postgresql@14-main >/dev/null 2>&1
+
+    x=0; M=("▖" "▘" "▝" "▗" "▉")
+    Write_no_newline "● Aguarde 30 segundos pelo reinício total do Postgres... "
+    for i in {0..29}; do
+      [ ${x} -eq 4 ] && x=0
+      Write_no_newline "\r● Aguarde 30 segundos pelo reinício total do Postgres... [${M[$x]}]"; let x++
+      sleep 1
+    done
+    Write "\r● Aguarde 30 segundos pelo reinício total do Postgres... [${M[4]}]";
+
+    Write "● \"OK\" se estiver \"${INTERNAL_IP}|streaming\"..."
+    sudo -u postgres psql -h ${PGSQL_PRIMARY_IP} -p 5432 -Atc "SELECT client_addr, state FROM pg_stat_replication;" -P pager=off >/dev/null 2>&1
+
+    # Esperado no sudo tail -f /var/log/postgresql/postgresql-14-main.log
+    # LOG:  started streaming WAL from primary at 0/5000000 on timeline 1
+
+    sudo -u postgres psql -h ${PGSQL_PRIMARY_IP} -p 5432 -Atc "select slot_name, slot_type, active, wal_status from pg_replication_slots;" -P pager=off >/dev/null 2>&1
+    sudo -u postgres psql -h ${PGSQL_PRIMARY_IP} -p 5432 -Atc "select * from pg_stat_replication;" -P pager=off >/dev/null 2>&1
+    sudo -u postgres psql -p 5432 -Atc "select * from pg_stat_wal_receiver;" -P pager=off >/dev/null 2>&1
+
+    # Checking...
+    #ps aux | grep walreceiver
+    
+    # Promoting...
+    # pg_ctl promote -D ${PSQL_DB1_DATA_DIR}
+  else
+    # PRIMARY...
+    Write "● Configurando DB ${BBlue}Primário${Color_Off}..."
+    #sudo -u postgres psql template1 -p 5432 -Atc "CREATE USER replicador REPLICATION;" -P pager=off
+    sudo -u postgres psql template1 -p 5432 -Atc "CREATE ROLE replicador WITH REPLICATION PASSWORD '${PGSQL_RPL_PW}' LOGIN;" -P pager=off >/dev/null
+    
+    sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#primary_conninfo = ''/primary_conninfo = 'user=replicador host=${PGSQL_PRIMARY_IP} port=5432 sslmode=prefer sslcompression=1'/g"
+
+    # SLOT...
+    # SELECT pg_create_physical_replication_slot('slot_replication');
+    # AQUI...
+    # sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#synchronous_standby_names = ''/synchronous_standby_names = '*'/g"
+    # sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#primary_slot_name = ''/primary_slot_name = 'standby1_slot'/g"
+    # sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#wal_keep_size = 0/wal_keep_size = 512/g"
+    # sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#max_replication_slots = 10/max_replication_slots = 10/g"
+    # sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#max_wal_senders = 10/max_wal_senders = 10/g"
+    # sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#wal_level = replica/wal_level = replica/g"
+    # sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#synchronous_commit = on/synchronous_commit = on/g"
+    # sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#hot_standby = on/hot_standby = on/g"
+    # sudo sed -i ${PSQL_DB1_ETC_DIR}/postgresql.conf -re "s/#wal_log_hints = off/wal_log_hints = on/g"
+
+    echo "${PGSQL_PRIMARY_IP}:5432:*:postgres:${PGSQL_PW}" | sudo -iu postgres tee -a /var/lib/postgresql/.pgpass >/dev/null 2>&1
+    sudo chmod 0600 /var/lib/postgresql/.pgpass
+
+    sudo systemctl enable postgresql@14-main >/dev/null 2>&1 && (Do_log "PostgreSQL DB1 primário instalado"; Mail_append "PostgreSQL DB1 primário instalado<BR /> " )
+    sudo systemctl restart postgresql@14-main >/dev/null 2>&1
+    # Checking...
+    #ps aux | grep walsender
+
+  fi
+}
+
+# -------------------------------
+function Setup_postgres_db2 {
+
+  # SECOND INSTANCE - DB2
+  Write "● Instalando PostgreSQL DB2. Aguarde..."
+  sudo mkdir /var/lib/postgresql/14/db2
+  sudo touch /var/log/postgresql/postgresql-14-db2.log
+  sudo chown -R postgres:postgres /var/lib/postgresql/14/db2
+  sudo chown postgres:postgres /var/log/postgresql/postgresql-14-db2.log
+
+  sudo -u postgres pg_createcluster -u postgres -g postgres -d /var/lib/postgresql/14/db2 -l /var/log/postgresql/postgresql-14-db2.log -p 5433 --start 14 db2 > /dev/null
+
+  sudo cp -p /etc/postgresql/14/db2/postgresql.conf /etc/postgresql/14/db2/postgresql.conf.${BEXT} >/dev/null 2>&1
+  sudo cp -p /etc/postgresql/14/db2/pg_hba.conf /etc/postgresql/14/db2/pg_hba.conf.${BEXT} >/dev/null 2>&1
+
+  echo "host    all             all             ${INTERNAL_NETWORK}            md5" | sudo tee -a /etc/postgresql/14/db2/pg_hba.conf >/dev/null 2>&1
+  echo "host    all             all             172.17.0.0/16            md5" | sudo tee -a /etc/postgresql/14/db2/pg_hba.conf >/dev/null 2>&1
+
+  sudo sed -i /etc/postgresql/14/db2/postgresql.conf -re "s/#listen_addresses = 'localhost'/listen_addresses = '*'/g"
+  sudo -u postgres psql -p5433 -Atc "alter user ${PGSQL_USER} with encrypted password '${PGSQL_PW}';"  -P pager=off > /dev/null
+
+  sudo systemctl daemon-reload >/dev/null 2>&1
+  sudo systemctl enable postgresql@14-db2 >/dev/null 2>&1 && (Do_log "PostgreSQL DB2 instalado"; Mail_append "PostgreSQL DB2 instalado<BR /> " )
+  sudo pg_ctlcluster 14 db2 stop >/dev/null 2>&1
+  sudo pg_ctlcluster 14 db2 start >/dev/null 2>&1
+
+  sudo -u postgres createdb -p 5433 unity_sip
+  sudo -u postgres createdb -p 5433 unity_log
+  #sudo -u postgres psql -q -d unity_log -f ${DPWD}/Unity/${UNITY_DB_LOG} -p 5433
+}
+
+# -------------------------------
+function Setup_unity_monitoring {
+  # Container Unity Monitoring
+  sudo cp ${DPWD}/dgvx/dgvx-container-monitoring.tpl /opt/digivox/docker-scripts/dgvx-container-monitoring
+  Write_no_newline "● Container Unity Monitoring..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monitoring -re "s/UNITY_TAG_MONITORING/${UNITY_TAG_MONITORING}/g"
+  #sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monitoring -re "s/TIMEZONE/${TIMEZONE}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monitoring -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-monitoring
+  sudo /opt/digivox/docker-scripts/dgvx-container-monitoring  >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+  Do_log "Container Unity Monitoring"; Mail_append "Container Unity Monitoring<BR /> "
+
+  # ---
+  sudo chgrp suporte /opt/digivox/docker-scripts/*
+}
+
+# -------------------------------
+function Setup_unity_cc {
+  # Container Unity CallCenter Active Monitor
+  sudo cp ${DPWD}/dgvx/dgvx-container-callcenter-active-monitor.tpl /opt/digivox/docker-scripts/dgvx-container-callcenter-active-monitor
+  Write_no_newline "● Container Unity CallCenter Active Monitor..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-callcenter-active-monitor -re "s/UNITY_TAG_CC_ACTIVE_MONITOR/${UNITY_TAG_CC_ACTIVE_MONITOR}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-callcenter-active-monitor -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-callcenter-active-monitor -re "s/UNITY_ACTIVE_MONITOR_DOMAINS/${UNITY_ACTIVE_MONITOR_DOMAINS}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-callcenter-active-monitor -re "s/UNITY_SS_PW/${UNITY_SS_PW}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-callcenter-active-monitor -re "s/UNITY_RABBITMQ_USER/${UNITY_RABBITMQ_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-callcenter-active-monitor -re "s/UNITY_RABBITMQ_PW/${UNITY_RABBITMQ_PW}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-callcenter-active-monitor
+  sudo /opt/digivox/docker-scripts/dgvx-container-callcenter-active-monitor  >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  # Container Unity CallCenter Evens Logs
+  sudo cp ${DPWD}/dgvx/dgvx-container-unity-events-logs.tpl /opt/digivox/docker-scripts/dgvx-container-unity-events-logs
+  Write_no_newline "● Container Unity CallCenter Events Logs..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-events-logs -re "s/UNITY_TAG_CC_EVENTS_LOGS/${UNITY_TAG_CC_EVENTS_LOGS}/g"
+  #sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-events-logs -re "s/TIMEZONE/${TIMEZONE}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-events-logs -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-events-logs -re "s/UNITY_PGSQL_USER/${UNITY_PGSQL_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-events-logs -re "s/UNITY_PGSQL_PW/${UNITY_PGSQL_PW}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-events-logs -re "s/UNITY_RABBITMQ_USER/${UNITY_RABBITMQ_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-events-logs -re "s/UNITY_RABBITMQ_PW/${UNITY_RABBITMQ_PW}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-unity-events-logs
+  sudo /opt/digivox/docker-scripts/dgvx-container-unity-events-logs  >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  # Container Unity CallCenter Protocol Update
+  sudo cp ${DPWD}/dgvx/dgvx-container-unity-protocol-update.tpl /opt/digivox/docker-scripts/dgvx-container-unity-protocol-update
+  Write_no_newline "● Container Unity CallCenter Protocol Update..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-protocol-update -re "s/UNITY_TAG_CC_PROTOCOL_UPDATE/${UNITY_TAG_CC_PROTOCOL_UPDATE}/g"
+  #sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-protocol-update -re "s/TIMEZONE/${TIMEZONE}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-protocol-update -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-protocol-update -re "s/UNITY_PGSQL_USER/${UNITY_PGSQL_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-protocol-update -re "s/UNITY_PGSQL_PW/${UNITY_PGSQL_PW}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-unity-protocol-update
+  sudo /opt/digivox/docker-scripts/dgvx-container-unity-protocol-update  >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  # AQUI: callcenter-active-event?
+
+  # ---
+  sudo chgrp suporte /opt/digivox/docker-scripts/*
+
+  Do_log "Container Unity CallCenter"; Mail_append "Container Unity CallCenter<BR /> "
+}
+
+# -------------------------------
+function Setup_unity_monit {
+  # Web, Web API, Cache Upater, CallCenter Worker, CallCenter Connector + (Mongo DB, Rabbit MQ)
+  # Container Unity Monit Rabbit MQ
+  sudo cp ${DPWD}/dgvx/dgvx-container-monit-rabbitmq.tpl /opt/digivox/docker-scripts/dgvx-container-monit-rabbitmq
+  Write_no_newline "● Container Unity Monit Rabbit MQ..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-rabbitmq -re "s/UNITY_TAG_MONIT_RABBITMQ/${UNITY_TAG_MONIT_RABBITMQ}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-rabbitmq -re "s/UNITY_RABBITMQ_ADMIN_PW/${UNITY_RABBITMQ_ADMIN_PW}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-rabbitmq -re "s/UNITY_RABBITMQ_USER/${UNITY_RABBITMQ_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-rabbitmq -re "s/UNITY_RABBITMQ_PW/${UNITY_RABBITMQ_PW}/g"
+
+  sudo sed -i /opt/digivox/unity/unity-sip-server/etc/unity/autoload_configs/amqp.conf.xml -re "s/localhost/${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/etc/unity/autoload_configs/modules.conf.xml -re "s/<modules>/<modules>\n                <load module=\"mod_amqp\"\/>/g"
+  sudo sed -i /opt/digivox/unity/unity-sip-server/etc/unity/autoload_configs/lua.conf.xml -re "s/<param name=\"startup-script\" value=\"app\/call_center\/logs.lua\"\/>/<\!-- <param name=\"startup-script\" value=\"app\/call_center\/logs.lua\"\/> -->/g"
+
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-monit-rabbitmq
+  sudo /opt/digivox/docker-scripts/dgvx-container-monit-rabbitmq >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  # Container Unity Monit Mongo DB
+  sudo cp ${DPWD}/dgvx/dgvx-container-mongo.tpl /opt/digivox/docker-scripts/dgvx-container-mongo
+  Write_no_newline "● Container Unity Monit Mongo DB..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-mongo -re "s/UNITY_MONGO_USER/${UNITY_MONGO_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-mongo -re "s/UNITY_MONGO_PW/${UNITY_MONGO_PW}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-mongo
+  sudo /opt/digivox/docker-scripts/dgvx-container-mongo >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  # Container Unity Monit Cache Updater
+  sudo cp ${DPWD}/dgvx/dgvx-container-monit-cache-updater.tpl /opt/digivox/docker-scripts/dgvx-container-monit-cache-updater
+  Write_no_newline "● Container Unity Monit Cache Updater..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-cache-updater -re "s/UNITY_TAG_MONIT_CACHE_UPDATER/${UNITY_TAG_MONIT_CACHE_UPDATER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-cache-updater -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  #sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-cache-updater -re "s/TIMEZONE/${TIMEZONE}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-cache-updater -re "s/UNITY_REDIS/${UNITY_REDIS}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-cache-updater -re "s/UNITY_PGSQL_USER/${UNITY_PGSQL_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-cache-updater -re "s/UNITY_PGSQL_PW/${UNITY_PGSQL_PW}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-cache-updater -re "s/UNITY_MONGO_DB/${UNITY_MONGO_DB}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-cache-updater -re "s/UNITY_MONGO_USER/${UNITY_MONGO_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-cache-updater -re "s/UNITY_MONGO_PW/${UNITY_MONGO_PW}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-monit-cache-updater
+  sudo /opt/digivox/docker-scripts/dgvx-container-monit-cache-updater >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  # Container Unity Monit CallCenter Connector
+  sudo cp ${DPWD}/dgvx/dgvx-container-monit-callcenter-connector.tpl /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-connector
+  Write_no_newline "● Container Unity Monit CallCenter Connector..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-connector -re "s/UNITY_TAG_MONIT_CALLCENTER/${UNITY_TAG_MONIT_CALLCENTER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-connector -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  #sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-connector -re "s/TIMEZONE/${TIMEZONE}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-connector -re "s/UNITY_RABBITMQ_USER/${UNITY_RABBITMQ_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-connector -re "s/UNITY_RABBITMQ_PW/${UNITY_RABBITMQ_PW}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-connector
+  sudo /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-connector >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  # Container Unity Monit CallCenter Worker
+  sudo cp ${DPWD}/dgvx/dgvx-container-monit-callcenter-worker.tpl /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-worker
+  Write_no_newline "● Container Unity Monit CallCenter Worker..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-worker -re "s/UNITY_TAG_MONIT_CALLCENTER_WORKER/${UNITY_TAG_MONIT_CALLCENTER_WORKER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-worker -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  #sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-worker -re "s/TIMEZONE/${TIMEZONE}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-worker -re "s/UNITY_REDIS/${UNITY_REDIS}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-worker -re "s/UNITY_RABBITMQ_IP/${UNITY_RABBITMQ_IP}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-worker -re "s/UNITY_RABBITMQ_USER/${UNITY_RABBITMQ_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-worker -re "s/UNITY_RABBITMQ_PW/${UNITY_RABBITMQ_PW}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-worker -re "s/UNITY_MONGO_DB/${UNITY_MONGO_DB}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-worker -re "s/UNITY_MONGO_USER/${UNITY_MONGO_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-worker -re "s/UNITY_MONGO_PW/${UNITY_MONGO_PW}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-worker
+  sudo /opt/digivox/docker-scripts/dgvx-container-monit-callcenter-worker >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  # Container Unity Monit Web API
+  sudo cp ${DPWD}/dgvx/dgvx-container-monit-web-api.tpl /opt/digivox/docker-scripts/dgvx-container-monit-web-api
+  Write_no_newline "● Container Unity Monit Web API..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-web-api -re "s/UNITY_TAG_MONIT_WEB_API/${UNITY_TAG_MONIT_WEB_API}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-web-api -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  #sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-web-api -re "s/TIMEZONE/${TIMEZONE}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-web-api -re "s/UNITY_REDIS/${UNITY_REDIS}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-web-api -re "s/UNITY_RABBITMQ_IP/${UNITY_RABBITMQ_IP}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-web-api -re "s/UNITY_RABBITMQ_USER/${UNITY_RABBITMQ_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-web-api -re "s/UNITY_RABBITMQ_PW/${UNITY_RABBITMQ_PW}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-web-api -re "s/UNITY_MONGO_DB/${UNITY_MONGO_DB}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-web-api -re "s/UNITY_MONGO_USER/${UNITY_MONGO_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-web-api -re "s/UNITY_MONGO_PW/${UNITY_MONGO_PW}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-monit-web-api
+  sudo /opt/digivox/docker-scripts/dgvx-container-monit-web-api >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  # Container Unity Monit Web
+  sudo cp ${DPWD}/dgvx/dgvx-container-monit-web.tpl /opt/digivox/docker-scripts/dgvx-container-monit-web
+  Write_no_newline "● Container Unity Monit Web..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-web -re "s/UNITY_TAG_MONIT_WEB/${UNITY_TAG_MONIT_WEB}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-web -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  #sudo sed -i /opt/digivox/docker-scripts/dgvx-container-monit-web -re "s/TIMEZONE/${TIMEZONE}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-monit-web
+  sudo /opt/digivox/docker-scripts/dgvx-container-monit-web >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+
+  # ---
+  sudo chgrp suporte /opt/digivox/docker-scripts/*
+  Do_log "Container Unity Monit"; Mail_append "Container Unity Monit<BR /> "
+}
+
+# -------------------------------
+function Setup_unity_api {
+  # Container Unity API
+  sudo cp ${DPWD}/dgvx/dgvx-container-unity-api.tpl /opt/digivox/docker-scripts/dgvx-container-unity-api
+  Write_no_newline "● Container Unity API..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-api -re "s/UNITY_TAG_API/${UNITY_TAG_API}/g"
+  #sudo sed -i /opt/digivox/docker-scripts/dgvx-container-unity-api -re "s/TIMEZONE/${TIMEZONE}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-unity-api
+  sudo chgrp suporte /opt/digivox/docker-scripts/*
+  sudo /opt/digivox/docker-scripts/dgvx-container-unity-api >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+  Do_log "Container Unity API"; Mail_append "Container Unity API<BR /> "
+}
+
+
+# -------------------------------
+function Setup_unity_ivr {
+  # Container Unity IVR
+  sudo cp ${DPWD}/dgvx/dgvx-container-ivr.tpl /opt/digivox/docker-scripts/dgvx-container-ivr
+  Write_no_newline "● Container Unity IVR..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-ivr -re "s/UNITY_TAG_IVR/${UNITY_TAG_IVR}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-ivr
+  sudo chgrp suporte /opt/digivox/docker-scripts/*
+  sudo /opt/digivox/docker-scripts/dgvx-container-ivr >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+  Do_log "Container Unity IVR"; Mail_append "Container Unity IVR<BR /> "
+}
+
+# -------------------------------
+function Setup_rabbit {
+  # Container Rabbit MQ
+  sudo cp ${DPWD}/dgvx/dgvx-container-rabbitmq.tpl /opt/digivox/docker-scripts/dgvx-container-rabbitmq
+  Write_no_newline "● Container Rabbit MQ..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-rabbitmq -re "s/RABBITMQ_VERSION/${RABBITMQ_VERSION}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-rabbitmq -re "s/RABBITMQ_PW/${RABBITMQ_PW}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-rabbitmq -re "s/RABBITMQ_NSSERVER_PW/${RABBITMQ_NSSERVER_PW}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-rabbitmq -re "s/RABBITMQ_NSCLIENT_PW/${RABBITMQ_NSCLIENT_PW}/g"
+
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-rabbitmq
+  sudo chgrp suporte /opt/digivox/docker-scripts/*
+  sudo /opt/digivox/docker-scripts/dgvx-container-rabbitmq >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+  Do_log "Container Unity Rabbit MQ"; Mail_append "Container Rabbit MQ<BR /> "
+}
+
+# -------------------------------
+function Setup_citrus {
+  Write "● Configurando Citrus conf..."
+  sudo cp ${DPWD}/dgvx/citrus.conf.tpl /opt/digivox/citrus/citrus.conf
+  sudo chmod 644 /opt/digivox/citrus/citrus.conf 
+  sudo sed -i /opt/digivox/citrus/citrus.conf -re "s/CITRUS_PGSQL_PRIMARY_IP/${CITRUS_PGSQL_PRIMARY_IP}/g"
+  sudo sed -i /opt/digivox/citrus/citrus.conf -re "s/CITRUS_PGSQL_PW/${CITRUS_PGSQL_PW}/g"
+  sudo sed -i /opt/digivox/citrus/citrus.conf -re "s/CITRUS_PGSQL_USER/${CITRUS_PGSQL_USER}/g"
+  sudo sed -i /opt/digivox/citrus/citrus.conf -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/citrus/citrus.conf -re "s/CITRUS_REDIS/${CITRUS_REDIS}/g"
+  sudo sed -i /opt/digivox/citrus/citrus.conf -re "s/CITRUS_BRANDING/${CITRUS_BRANDING}/g"
+
+  # Container Notification
+  sudo cp ${DPWD}/dgvx/dgvx-container-notification.tpl /opt/digivox/docker-scripts/dgvx-container-notification
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-notification
+  Write "● Container Citrus Notification..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-notification -re "s/NOTIFICATION_VERSION/${NOTIFICATION_VERSION}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-notification -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-notification -re "s/NOTIFICATION_USER/${NOTIFICATION_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-notification -re "s/NOTIFICATION_PW/${NOTIFICATION_PW}/g"
+  sudo /opt/digivox/docker-scripts/dgvx-container-notification >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  # Container Citrus (main)
+  sudo cp ${DPWD}/dgvx/dgvx-container-citrus.tpl /opt/digivox/docker-scripts/dgvx-container-citrus
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-citrus
+  Write "● Container Citrus (principal)..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus -re "s/CITRUS_VERSION/${CITRUS_VERSION}/g"
+  #sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus -re "s/TIMEZONE/${TIMEZONE}/g"
+  sudo /opt/digivox/docker-scripts/dgvx-container-citrus >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  # Container Citrus node API
+  # https://docs.digivox.academy/knowledge-base/citrus-cx-instalacao-da-v-2-41-0-com-novos-webservices/#configurar-nginx
+  sudo cp ${DPWD}/dgvx/dgvx-container-citrus-node-api.tpl /opt/digivox/docker-scripts/dgvx-container-citrus-node-api
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-citrus-node-api
+  Write "● Container Citrus node API..."
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus-node-api -re "s/CITRUS_NODE_API_VERSION/${CITRUS_NODE_API_VERSION}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus-node-api -re "s/INTERNAL_IP/${INTERNAL_IP}/g"
+  #sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus-node-api -re "s/TIMEZONE/${TIMEZONE}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus-node-api -re "s/CITRUS_NODE_API_DB/${CITRUS_NODE_API_DB}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus-node-api -re "s/CITRUS_NODE_API_DB_USER/${CITRUS_NODE_API_DB_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus-node-api -re "s/CITRUS_NODE_API_DB_PW/${CITRUS_NODE_API_DB_PW}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus-node-api -re "s/CITRUS_NODE_API_DB_IP/${CITRUS_NODE_API_DB_IP}/g"
+  sudo /opt/digivox/docker-scripts/dgvx-container-citrus-node-api >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  # Container Citrus chat node API
+  sudo cp ${DPWD}/dgvx/dgvx-container-citrus-chat-node-api.tpl /opt/digivox/docker-scripts/dgvx-container-citrus-chat-node-api
+  sudo chmod 755 /opt/digivox/docker-scripts/dgvx-container-citrus-chat-node-api
+  Write "● Container Citrus Chat node API..."
+  #sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus-chat-node-api -re "s/TIMEZONE/${TIMEZONE}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus-chat-node-api -re "s/CITRUS_CHAT_API_VERSION/${CITRUS_CHAT_API_VERSION}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus-chat-node-api -re "s/CITRUS_CHAT_API_DB/${CITRUS_CHAT_API_DB}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus-chat-node-api -re "s/CITRUS_CHAT_API_DB_USER/${CITRUS_CHAT_API_DB_USER}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus-chat-node-api -re "s/CITRUS_CHAT_API_DB_PW/${CITRUS_CHAT_API_DB_PW}/g"
+  sudo sed -i /opt/digivox/docker-scripts/dgvx-container-citrus-chat-node-api -re "s/CITRUS_CHAT_API_DB_IP/${CITRUS_CHAT_API_DB_IP}/g"
+  sudo /opt/digivox/docker-scripts/dgvx-container-citrus-chat-node-api >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+  sudo chgrp suporte /opt/digivox/docker-scripts/*
+  Do_log "Containers Citrus"; Mail_append "Containers Citrus<BR /> "
+}
+
+# Cumulate mail body/file
+#
+function Mail_append() {
+    echo -e "$*" >> $MAIL_FILE
+}
+
+function Decrypt() {
+    echo ${1} | openssl enc -aes-256-cbc -md sha256 -a -d -salt -pass pass:${ENC_KEY} 2>/dev/null
+}
+
+#
+# Send cumulated mail file
+function Mail_send() {
+   MAIL_MSG=$1
+   MAIL_MSG_STATUS=$2
+
+  case "$MAILER" in
+    1) # sendmail local
+      if [ ${1:0:1} = "/" ]; then
+        #echo -e "From: ${MAIL_NOME} <${MAIL_FROM}>\nTo: ${MAIL_FROM}\nSubject: ${MAIL_SUBJECT} - ${MAIL_MSG_STATUS}\nContent-Type: text/html\nMIME-Version: 1.0\n\n" > /tmp/backup_temp_mail_file
+        echo -e "From: ${MAIL_NOME} <${MAIL_FROM}>\nTo: ${MAIL_FROM}\nSubject: ${MAIL_SUBJECT}\nContent-Type: text/html\nMIME-Version: 1.0\n\n" > /tmp/backup_temp_mail_file
+        cat $MAIL_FILE >> /tmp/backup_temp_mail_file
+        cat /tmp/backup_temp_mail_file > $MAIL_FILE
+      else
+          #echo -e "From: ${MAIL_NAME} <${MAIL_FROM}>\nTo: ${MAIL_FROM}\nSubject: ${MAIL_SUBJECT} - ${MAIL_MSG_STATUS}\nContent-Type: text/html\nMIME-Version: 1.0\n\n${MAIL_MSG}" >> $MAIL_FILE
+          echo -e "From: ${MAIL_NAME} <${MAIL_FROM}>\nTo: ${MAIL_FROM}\nSubject: ${MAIL_SUBJECT}\nContent-Type: text/html\nMIME-Version: 1.0\n\n${MAIL_MSG}" >> $MAIL_FILE
+      fi
+      MAILER_SEND="cat ${MAIL_FILE} | sendmail -t"
+      ;;
+    2) # sendgrid
+      if [ ${1:0:1} = "/" ]; then
+          MAIL_MSG=$(cat ${MAIL_MSG})
+      fi
+      #SENDGRID_MAIL_DATA='{"personalizations": [{"to": [{"email": "'"${MAIL_TO}"'"}]}],"from": {"email": "'"${MAIL_FROM}"'","name": "'"${MAIL_NAME}"'"},"subject": "'"${MAIL_SUBJECT} - ${MAIL_MSG_STATUS}"'","content": [{"type": "text/html", "value": "'"${MAIL_MSG}"'"}]}'
+      SENDGRID_MAIL_DATA='{"personalizations": [{"to": [{"email": "'"${MAIL_TO}"'"}]}],"from": {"email": "'"${MAIL_FROM}"'","name": "'"${MAIL_NAME}"'"},"subject": "'"${MAIL_SUBJECT}"'","content": [{"type": "text/html", "value": "'"${MAIL_MSG}"'"}]}'
+      MAILER_SEND=$'curl -k --request POST --url https://api.sendgrid.com/v3/mail/send --header \'Authorization: Bearer \''
+      MAILER_SEND+="$SENDGRID_API_KEY"
+      MAILER_SEND+=$' --header \'Content-Type: application/json\' --data \''
+      MAILER_SEND+="$SENDGRID_MAIL_DATA"
+      MAILER_SEND+=$'\''
+      ;;
+    *) # sendemail + GMail
+      if [ ${1:0:1} = "/" ]; then
+          MAIL_MSG="-o message-file=${MAIL_MSG}"
+      else
+          MAIL_MSG="-m '${MAIL_MSG}'"
+      fi
+      DEC_PW=$(Decrypt ${MAIL_PW})
+      #MAILER_SEND='sendemail -f "$MAIL_NAME <${MAIL_FROM}>" -u "$MAIL_SUBJECT - $MAIL_MSG_STATUS" -t "$MAIL_TO" -s "smtp.gmail.com:587" -o tls=yes -xu "$MAIL_FROM" -xp "$DEC_PW" -o message-content-type=html $MAIL_MSG'
+      MAILER_SEND='sendemail -f "$MAIL_NAME <${MAIL_FROM}>" -u "$MAIL_SUBJECT" -t "$MAIL_TO" -s "smtp.gmail.com:587" -o tls=yes -xu "$MAIL_FROM" -xp "$DEC_PW" -o message-content-type=html $MAIL_MSG'
+      ;;
+  esac
+
+      #if RESULT=$(eval $MAILER_SEND 2>&1); then
+   if RESULT=$(eval $MAILER_SEND); then
+      Write "Email enviado para ${MAIL_TO}"
+      Do_log "INFO mail enviado para ${MAIL_TO}"
+   else
+      Write "Falha no envio de email: (${RESULT})..."
+      Do_log "ERROR email nao enviado: ${RESULT}"
+   fi
+}
+
+
+
+
+
+
+
+# -----------------------------------------------------------------------------
+#                                   MAIN
+# -----------------------------------------------------------------------------
+
+
+unset USER_NAME USER_PKEY USER_TEAM REMOTE_ERROR SSH_CMD_SCRIPT JUST_TEST
+declare -A USER_NAME USER_PKEY USER_TEAM
+
+# Prepare to fight!...
+test -f /usr/bin/sudo || {
+  echo -e "● Instale o pacote sudo antes." 1>&2
+  exit 1
+}
+
+if [ -e "$CONF_FILE" ] ; then
+   source ${CONF_FILE} # Reading variables...
+else
+  echo "● Arquivo de configuração não encontrado ou não especificado." 1>&2
+  exit 1
+fi
+
+if $SETUP_VPN && [ ! -e "$VPN_CLIENT_FILES" ] ; then
+  echo "● Arquivo de configuração da VPN ${VPN_CLIENT_FILES} não encontrado." 1>&2
+  exit 1
+fi
+
+if $SETUP_UNITY && [ ! -e "Unity/$UNITY_BIN" ] ; then
+  echo "● Arquivo Unity/$UNITY_BIN com binário do Unity não encontrado." 1>&2
+  exit 1
+fi
+
+(( ${EUID:-0} || $(id -u) )) && {
+  echo "● Script exclusivo para uso do root/sudoer." 1>&2
+  exit 1
+}
+
+# Environment...
+VENDOR="$(cat /sys/devices/virtual/dmi/id/sys_vendor)"
+LANG="${LANG}"
+DPWD=$(pwd)
+OLD_HOSTNAME=$(hostname)
+EXTERNAL_IP=$(curl -k -s http://ifconfig.me)
+CURRENT_IP=$(ip route get 1 | sed -n 's/.*src \([0-9.]\+\).*/\1/p')
+INTERNAL_MASK="${INTERNAL_NETWORK#*/}" # Máscara de rede em notação CIDR
+BEXT=$(date "+%Y-%m-%d") # Backup extensions
+
+
+IS_AWS=false
+[ -f /sys/devices/virtual/dmi/id/product_uuid ] && [ $(head -c 3 /sys/devices/virtual/dmi/id/product_uuid 2> /dev/null) == EC2 ] 2> /dev/null && IS_AWS=true
+[[ ! -z $(curl -k -s http://169.254.169.254/1.0/ -f -s --connect-timeout 3 --max-time 3) ]] && IS_AWS=true
+[ -f /sys/hypervisor/uuid ] && [ $(head -c 3 /sys/hypervisor/uuid 2> /dev/null) == ec2 ] 2> /dev/null && IS_AWS=true
+
+# -----------------------------------------------------------------------------
+# BRIEFING...
+source dgvx/dgvx-bash-lib >/dev/null 2>&1
+
+OK="${BGreen}OK${Color_Off}"
+FAIL="${BRed}FALHA${Color_Off}"
+
+echo -e "${BBlue}${0##*/}${Color_Off} v${SCRIPT_VERSION} - $(date)"
+echo -e "${BYellow}LEIA OS ARQUIVOS INSTALL E INSTALL.Digivox${Color_Off}\n"
+echo -e "Informações de instalação no arquivo ${BWhite}${CONF_FILE}${Color_Off}:\n"
+
+# AQUI... E se for bloco não usado? E se puder ser ip ou host?
+for CONF_IP in $INTERNAL_IP $VIP_IP $PGSQL_PRIMARY_IP; do
+  validateIP "$CONF_IP" || {
+      echo "$CONF_IP não é um IP válido! Reveja sua configuração."
+      exit 2
+  }
+done
+
+for CONF_HOST in $HOSTNAME; do
+  validateHostname "$CONF_HOST" || {
+      echo "$CONF_HOST não é um nome de host válido! Reveja sua configuração."
+      exit 2
+  }
+done
+
+echo -en "● Host: ${VENDOR} `cat /sys/devices/virtual/dmi/id/product_name` `cat /sys/devices/virtual/dmi/id/product_version` | On premises: "
+$IS_AWS && {
+  ON_PREMISES=false
+  AWS_INSTANCE_ID=$(curl -k -s http://169.254.169.254/latest/meta-data/instance-id/)
+  AWS_AZ=$(curl -k -s http://169.254.169.254/latest/meta-data/placement/availability-zone/)
+  AWS_PUB_IP=$(curl -k -s http://169.254.169.254/latest/meta-data/public-ipv4/)
+  echo "$(CBoo ${ON_PREMISES}) (AWS detectada)"
+  echo "   Atenção: necessário configurar zona aws.digivox.com.br (A ${AWS_PUB_IP}), tags relacionadas e função IAM no AWS Console"
+} || {
+  ON_PREMISES=true
+  echo -n "$(CBoo ${ON_PREMISES})"
+  [ "${VENDOR:0:6}" == "VMware" ] && echo " | open-vm-tools será instalado" || echo 
+}
+
+echo -e "● Hostname: ${BCyan}${HOSTNAME}${Color_Off} IP interno: ${BWhite}${INTERNAL_IP}/${INTERNAL_MASK}${Color_Off} (rede: ${BWhite}${INTERNAL_NETWORK}${Color_Off})"
+echo -e "● Time zone: ${BWhite}${TIMEZONE}${Color_Off} Locale: ${BWhite}${LANG}${Color_Off}"
+
+[ ! "${INTERNAL_IP}" == "${CURRENT_IP}" ] && {
+  echo -e "   ${ALERT}ATENÇÃO${Color_Off}: IP atual (${BYellow}${CURRENT_IP}${Color_Off}) é diferente do que será configurado no software (${BWhite}${INTERNAL_IP}${Color_Off})"
+  echo "   Este procedimento não altera o dispositivo de rede"
+}
+
+echo -en "● SSH: porta ${BWhite}${SSH_PORT}${Color_Off} "
+[ ! "${SSH_PORT}" = "22" ] && {
+  echo "(válido imediatamente após esta instalação)"
+} || echo
+
+echo -n "● Keepalived: $(CBoo ${SETUP_KEEPALIVED})"
+$SETUP_KEEPALIVED && {
+  echo " VIP: ${VIP_IP}/${VIP_MASK} State: ${VIP_STATE} PW: ${VIP_PW} Priority: ${VIP_PRIORITY}"
+} || echo
+
+echo -e "● Redis: $(CBoo ${SETUP_REDIS})"
+$SETUP_REDIS || {
+  ${SETUP_UNITY} && {
+    [ "${UNITY_REDIS}" == "${INTERNAL_IP}" ] && {
+      echo -e "   ${ALERT}ATENÇÃO${Color_Off}: Redis não será instalado, mas o IP do Unity foi configurado como sendo dest servidor (${INTERNAL_IP})"
+      echo "   Recomenda-se não continuar! Reveja suas configurações"
+    }
+  }
+}
+
+echo -en "● DNS (Bind9): $(CBoo ${SETUP_DNS})"
+$SETUP_DNS && {
+  echo -e " (Domínio: ${BCyan}${DNS_DOMAIN}${Color_Off})"
+} || echo
+
+echo -en "● PostgreSQL: $(CBoo ${SETUP_POSTGRESQL}) Modo: "
+$SETUP_POSTGRESQL && {
+  $SETUP_REPLICA && echo -en "${BBlue}Réplica${Color_Off} (ATENÇÃO: O dgvx-install considera que o PostgreSQL primário/master está ativo drante a instalação de uma réplica) " || echo -en "${BBlue}Primário${Color_Off} " 
+  echo -e "(Instalar DB2: $(CBoo ${SETUP_POSTGRESQL_DB2}))" 
+  # AQUI testar Master online?
+}
+
+echo "● PRODUTOS - Unity: $(CBoo ${SETUP_UNITY}) Citrus: $(CBoo ${SETUP_CITRUS})"
+
+$SETUP_UNITY && {
+
+  ! $SETUP_SIP_SERVER & ! $SETUP_UNITY_MANAGER && {
+    echo -e "   ${ALERT}ATENÇÃO${Color_Off}: Instalação do Unity habilitada mas SETUP_SIP_SERVER = SETUP_UNITY_MANAGER = false"
+    echo "   Recomenda-se não continuar! Reveja suas configurações"
+  }
+
+  echo "● Unity SIP Server: $(CBoo ${SETUP_SIP_SERVER})"
+
+  $SETUP_SIP_SERVER && {
+    echo -e "   Binário (árvore compactada): ${UNITY_BIN}"
+    echo -e "   Redis: ${BWhite}${UNITY_REDIS}${Color_Off} Provisionento: $(CBoo ${SETUP_UNITY_PROVISIONING}) Chat: $(CBoo ${SETUP_UNITY_CHAT})"
+
+    echo -e "   Unity DB - IP: ${BWhite}${UNITY_PGSQL_PRIMARY_IP}${Color_Off} User: ${BWhite}${UNITY_PGSQL_USER}${Color_Off} Password: ***"
+    echo -e "   Unity DB Arquivos - unity_core: ${BWhite}${UNITY_DB_CORE}${Color_Off} unity_sip: ${BWhite}${UNITY_DB_SIP}${Color_Off}"
+
+    UNITY_TAG_MANAGER_ONLINE=$(curl -k -s https://dev.digivox.com.br/downloads/versoes/unity-manager.txt -f -s --connect-timeout 3 --max-time 3)
+    [ "${UNITY_TAG_MANAGER}" == "newest" ] && UNITY_TAG_MANAGER=${UNITY_TAG_MANAGER_ONLINE}
+    echo -en "   Manager: $(CBoo ${SETUP_UNITY_MANAGER}) v${BWhite}${UNITY_TAG_MANAGER}${Color_Off} "
+    [ "${UNITY_TAG_MANAGER}" == "${UNITY_TAG_MANAGER_ONLINE}" ] && echo -en "🆕 " || echo -en "(Disponível: v${BPurple}${UNITY_TAG_MANAGER_ONLINE}${Color_Off}) "
+
+    UNITY_TAG_INTEGRATION_ONLINE=$(curl -k -s https://dev.digivox.com.br/downloads/versoes/unity-integration-server.txt -f -s --connect-timeout 3 --max-time 3)
+    [ "${UNITY_TAG_INTEGRATION}" == "newest" ] && UNITY_TAG_INTEGRATION=${UNITY_TAG_INTEGRATION_ONLINE}
+    echo -en "   Integration Server: $(CBoo ${SETUP_UNITY_INTEGRATION}) v${BWhite}${UNITY_TAG_INTEGRATION}${Color_Off} "
+    [ "${UNITY_TAG_INTEGRATION}" == "${UNITY_TAG_INTEGRATION_ONLINE}" ] && echo -e "🆕" || echo -e "(Disponível: v${BPurple}${UNITY_TAG_INTEGRATION_ONLINE}${Color_Off})"
+
+    UNITY_TAG_IVR_ONLINE=$(curl -k -s https://dev.digivox.com.br/downloads/versoes/unity-ivr.txt -f -s --connect-timeout 3 --max-time 3)
+    [ "${UNITY_TAG_IVR}" == "newest" ] && UNITY_TAG_IVR=${UNITY_TAG_IVR_ONLINE}
+    echo -en "   IVR: $(CBoo ${SETUP_UNITY_IVR}) v${BWhite}${UNITY_TAG_IVR}${Color_Off} "
+    [ "${UNITY_TAG_IVR}" == "${UNITY_TAG_IVR_ONLINE}" ] && echo -en "🆕 " || echo -en "(Disponível: v${BPurple}${UNITY_TAG_IVR_ONLINE}${Color_Off}) "
+
+    UNITY_TAG_API_ONLINE=$(curl -k -s https://dev.digivox.com.br/downloads/versoes/unity-api.txt -f -s --connect-timeout 3 --max-time 3)
+    [ "${UNITY_TAG_API}" == "newest" ] && UNITY_TAG_API=${UNITY_TAG_API_ONLINE}
+    echo -en "   API: $(CBoo ${SETUP_UNITY_API}) v${BWhite}${UNITY_TAG_API}${Color_Off} "
+    [ "${UNITY_TAG_API}" == "${UNITY_TAG_API_ONLINE}" ] && echo -en "🆕 " || echo -en "(Disponível: v${BPurple}${UNITY_TAG_API_ONLINE}${Color_Off}) "
+
+    UNITY_TAG_MONITORING_ONLINE=$(curl -k -s https://dev.digivox.com.br/downloads/versoes/unity-monitoring-server.txt -f -s --connect-timeout 3 --max-time 3)
+    [ "${UNITY_TAG_MONITORING}" == "newest" ] && UNITY_TAG_MONITORING=${UNITY_TAG_MONITORING_ONLINE}
+    echo -en "   Monitoring: $(CBoo ${SETUP_UNITY_MONITORING}) v${BWhite}${UNITY_TAG_MONITORING}${Color_Off} "
+    [ "${UNITY_TAG_MONITORING}" == "${UNITY_TAG_MONITORING_ONLINE}" ] && echo -e "🆕" || echo -e "(Disponível: v${BPurple}${UNITY_TAG_MONITORING_ONLINE}${Color_Off})"
+  }
+
+  echo "● Unity Monit: $(CBoo ${SETUP_UNITY_MONIT})"
+  $SETUP_UNITY_MONIT && {
+    echo -en "   Rabbit MQ: v${BWhite}${UNITY_TAG_MONIT_RABBITMQ}${Color_Off} "
+
+    UNITY_TAG_MONIT_CACHE_UPDATER_ONLINE=$(curl -s https://dev.digivox.com.br/downloads/versoes/monit-cache-updater.txt -f -s --connect-timeout 3 --max-time 3)
+    [ "${UNITY_TAG_MONIT_CACHE_UPDATER}" == "newest" ] && UNITY_TAG_MONIT_CACHE_UPDATER=${UNITY_TAG_MONIT_CACHE_UPDATER_ONLINE}
+    echo -en "   Cache Updater: v${BWhite}${UNITY_TAG_MONIT_CACHE_UPDATER}${Color_Off} "
+    [ "${UNITY_TAG_MONIT_CACHE_UPDATER}" == "${UNITY_TAG_MONIT_CACHE_UPDATER_ONLINE}" ] && echo -e "🆕" || echo -e "(Disponível: v${BPurple}${UNITY_TAG_MONIT_CACHE_UPDATER_ONLINE}${Color_Off})"
+
+    UNITY_TAG_MONIT_CALLCENTER_ONLINE=$(curl -k -s https://dev.digivox.com.br/downloads/versoes/monit-callcenter-connector.txt -f -s --connect-timeout 3 --max-time 3)
+    [ "${UNITY_TAG_MONIT_CALLCENTER}" == "newest" ] && UNITY_TAG_MONIT_CALLCENTER=${UNITY_TAG_MONIT_CALLCENTER_ONLINE}
+    echo -en "   CallCenter Connector: v${BWhite}${UNITY_TAG_MONIT_CALLCENTER}${Color_Off} "
+    [ "${UNITY_TAG_MONIT_CALLCENTER}" == "${UNITY_TAG_MONIT_CALLCENTER_ONLINE}" ] && echo -en "🆕 " || echo -en "(Disponível: v${BPurple}${UNITY_TAG_MONIT_CALLCENTER_ONLINE}${Color_Off}) "
+
+    UNITY_TAG_MONIT_CALLCENTER_WORKER_ONLINE=$(curl -k -s https://dev.digivox.com.br/downloads/versoes/monit-callcenter-worker.txt -f -s --connect-timeout 3 --max-time 3)
+    [ "${UNITY_TAG_MONIT_CALLCENTER_WORKER}" == "newest" ] && UNITY_TAG_MONIT_CALLCENTER_WORKER=${UNITY_TAG_MONIT_CALLCENTER_WORKER_ONLINE}
+    echo -en "   CallCenter Worker: v${BWhite}${UNITY_TAG_MONIT_CALLCENTER_WORKER}${Color_Off} "
+    [ "${UNITY_TAG_MONIT_CALLCENTER_WORKER}" == "${UNITY_TAG_MONIT_CALLCENTER_WORKER_ONLINE}" ] && echo -e "🆕" || echo -e "(Disponível: v${BPurple}${UNITY_TAG_MONIT_CALLCENTER_WORKER_ONLINE}${Color_Off})"
+
+    UNITY_TAG_MONIT_WEB_ONLINE=$(curl -k -s https://dev.digivox.com.br/downloads/versoes/monit-web.txt -f -s --connect-timeout 3 --max-time 3)
+    [ "${UNITY_TAG_MONIT_WEB}" == "newest" ] && UNITY_TAG_MONIT_WEB=${UNITY_TAG_MONIT_WEB_ONLINE}
+    echo -en "   Web: v${BWhite}${UNITY_TAG_MONIT_WEB}${Color_Off} "
+    [ "${UNITY_TAG_MONIT_WEB}" == "${UNITY_TAG_MONIT_WEB_ONLINE}" ] && echo -en "🆕 " || echo -en "(Disponível: v${BPurple}${UNITY_TAG_MONIT_WEB_ONLINE}${Color_Off}) "
+
+    UNITY_TAG_MONIT_WEB_API_ONLINE=$(curl -k -s https://dev.digivox.com.br/downloads/versoes/monit-web-api.txt -f -s --connect-timeout 3 --max-time 3)
+    [ "${UNITY_TAG_MONIT_WEB_API}" == "newest" ] && UNITY_TAG_MONIT_WEB_API=${UNITY_TAG_MONIT_WEB_API_ONLINE}
+    echo -en "   Web API: v${BWhite}${UNITY_TAG_MONIT_WEB_API}${Color_Off} "
+    [ "${UNITY_TAG_MONIT_WEB_API}" == "${UNITY_TAG_MONIT_WEB_API_ONLINE}" ] && echo -e "🆕" || echo -e "(Disponível: v${BPurple}${UNITY_TAG_MONIT_WEB_API_ONLINE}${Color_Off})"
+
+  }
+
+  echo "● Unity CallCenter: $(CBoo ${SETUP_UNITY_CC})"
+  $SETUP_UNITY_CC && {
+
+    UNITY_TAG_CC_EVENTS_LOGS_ONLINE=$(curl -k -s https://dev.digivox.com.br/downloads/versoes/unity-events-logs.txt -f -s --connect-timeout 3 --max-time 3)
+    [ "${UNITY_TAG_CC_EVENTS_LOGS}" == "newest" ] && UNITY_TAG_CC_EVENTS_LOGS=${UNITY_TAG_CC_EVENTS_LOGS_ONLINE}
+    echo -en "   Events Logs: v${BWhite}${UNITY_TAG_CC_EVENTS_LOGS}${Color_Off} "
+    [ "${UNITY_TAG_CC_EVENTS_LOGS}" == "${UNITY_TAG_CC_EVENTS_LOGS_ONLINE}" ] && echo -en "🆕 " || echo -en "(Disponível: v${BPurple}${UNITY_TAG_CC_EVENTS_LOGS_ONLINE}${Color_Off}) "
+
+    UNITY_TAG_CC_ACTIVE_MONITOR_ONLINE=$(curl -k -s https://dev.digivox.com.br/downloads/versoes/callcenter-active-monitor.txt -f -s --connect-timeout 3 --max-time 3)
+    [ "${UNITY_TAG_CC_ACTIVE_MONITOR}" == "newest" ] && UNITY_TAG_CC_ACTIVE_MONITOR=${UNITY_TAG_CC_ACTIVE_MONITOR_ONLINE}
+    echo -en "   Cache Updater: v${BWhite}${UNITY_TAG_CC_ACTIVE_MONITOR}${Color_Off} "
+    [ "${UNITY_TAG_CC_ACTIVE_MONITOR}" == "${UNITY_TAG_CC_ACTIVE_MONITOR_ONLINE}" ] && echo -en "🆕 " || echo -en "(Disponível: v${BPurple}${UNITY_TAG_CC_ACTIVE_MONITOR_ONLINE}${Color_Off}) "
+
+    UNITY_TAG_CC_PROTOCOL_UPDATE_ONLINE=$(curl -k -s https://dev.digivox.com.br/downloads/versoes/unity-protocol-update.txt -f -s --connect-timeout 3 --max-time 3)
+    [ "${UNITY_TAG_CC_PROTOCOL_UPDATE}" == "newest" ] && UNITY_TAG_CC_PROTOCOL_UPDATE=${UNITY_TAG_CC_PROTOCOL_UPDATE_ONLINE}
+    echo -en "   Protocol Update: v${BWhite}${UNITY_TAG_CC_PROTOCOL_UPDATE}${Color_Off} "
+    [ "${UNITY_TAG_CC_PROTOCOL_UPDATE}" == "${UNITY_TAG_CC_PROTOCOL_UPDATE_ONLINE}" ] && echo -e "🆕" || echo -e "(Disponível: v${BPurple}${UNITY_TAG_CC_PROTOCOL_UPDATE_ONLINE}${Color_Off})"
+
+  }
+}
+
+
+
+# AQUI Citrus briefing
+#echo -e "● Serviço Rabbit MQ: v${BWhite}${RABBITMQ_VERSION}${Color_Off}"
+
+echo -en "● Usuários Linux iniciais: "
+for USER_EID in "${!USER_NAME[@]}"; do
+  echo -en "${USER_EID} "
+done
+
+echo -e "\n${BWhite}"
+read -p "*** Deseja continuar? (s/N) " -n 1 -r
+echo -e "${Color_Off}"
+[[ ! $REPLY =~ ^[SsYy]$ ]] && exit 0
+
+# -----------------------------------------------------------------------------
+# GO! DIGIVOX STRUCTURE...
+
+sudo groupadd suporte 2> /dev/null 
+sudo groupadd docker 2> /dev/null 
+
+sudo mkdir -p /opt/digivox/scripts 2> /dev/null 
+sudo mkdir -p /var/log/digivox 2> /dev/null 
+sudo chown -R root:suporte /var/log/digivox 2> /dev/null 
+sudo chgrp -R suporte /opt/digivox 2> /dev/null 
+sudo mkdir -p /opt/digivox/docker-data 2> /dev/null 
+sudo mkdir -p /opt/digivox/docker-scripts 2> /dev/null 
+sudo mkdir /opt/digivox/etc 2> /dev/null 
+sudo chgrp -R suporte /opt/digivox/etc
+sudo cp -p /etc/crontab /etc/crontab.${BEXT} 2> /dev/null 
+
+$SETUP_UNITY && {
+  sudo mkdir -p /opt/digivox/unity 2> /dev/null
+  sudo chmod -R 755 /opt/digivox/unity
+}
+
+$SETUP_CITRUS && {
+  # AQUI um ou outro? Pode ser ponto de montagem?
+  # Observar no template
+  sudo mkdir -p /opt/digivox/citrus/storage/attachments 2> /dev/null
+  sudo mkdir -p /opt/digivox/citrus/storage/backup 2> /dev/null
+  sudo chown -R 999:999 /opt/digivox/citrus/storage/attachments
+}
+
+Do_log  "${0##*/} v${SCRIPT_VERSION} - $(date)"; Mail_append "${0##*/} v${SCRIPT_VERSION} - $(date)<BR /> " 
+
+# -----------------------------------------------------------------------------
+# DATE, TIMEZONE, LOCALE, NTP...
+
+# Locale
+Write_no_newline "● Gerando locales (pt_BR en_US es_MX). Aguarde... "
+#sudo locale-gen en_US en_US.UTF-8 pt_BR pt_BR.UTF-8 pt_BR pt_BR.UTF-8 es_MX es_MX.UTF-8 >/dev/null 2>&1
+#sudo locale-gen >/dev/null 2>&1
+sudo apt-get install -y -q locales >/dev/null 2>&1
+sudo sed -i -e "s/# en_US.UTF-8.*/en_US.UTF-8 UTF-8/" /etc/locale.gen >/dev/null 2>&1
+sudo sed -i -e "s/# es_MX.UTF-8.*/es_MX.UTF-8 UTF-8/" /etc/locale.gen >/dev/null 2>&1
+sudo sed -i -e "s/# pt_BR.UTF-8.*/pt_BR.UTF-8 UTF-8/" /etc/locale.gen >/dev/null 2>&1
+#sudo dpkg-reconfigure --frontend=noninteractive locales >/dev/null 2>&1
+sudo locale-gen >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+Write_no_newline "● Configurando idioma do SO (locale '${BWhite}${LANG}${Color_Off}')... "
+sudo update-locale LANG=${LANG} >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+
+# TIMEZONE...
+# Quais? timedatectl list-timezones
+Write_no_newline "● Configurando timezone ${BWhite}${TIMEZONE}${Color_Off}..."
+sudo timedatectl set-timezone ${TIMEZONE} >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+sudo dpkg-reconfigure --frontend noninteractive tzdata >/dev/null 2>&1
+Do_log "Time zone: ${TIMEZONE}"; Mail_append "Time zone: ${TIMEZONE}<BR /> " 
+
+# systemd...
+# $IS_AWS || {
+#   sudo timedatectl set-ntp false
+#   sudo timedatectl set-time "$(date '+%Y-%m-%d %H:%M:%S')" >/dev/null 2>&1
+#   [[ -f /etc/systemd/timesyncd.conf ]] && {
+#     sudo cp /etc/systemd/timesyncd.conf /etc/systemd/timesyncd.conf.${BEXT} >/dev/null 2>&1
+#     echo -e "NTP=a.st1.ntp.br b.st1.ntp.br c.st1.ntp.br d.st1.ntp.br gps.ntp.br a.ntp.br b.ntp.br c.ntp.br" | sudo tee -a /etc/systemd/timesyncd.conf >/dev/null 2>&1
+#     sudo timedatectl set-ntp true >/dev/null 2>&1
+#     sudo systemctl restart systemd-timesyncd >/dev/null 2>&1
+#   }
+# }
+
+# -----------------------------------------------------------------------------
+# OS UPDATE...
+
+Write_no_newline "● Atualizando $(grep -oPm1 "(?<=PRETTY_NAME=\")[^\"]+" /etc/os-release)... "
+sudo apt -y -q update > /dev/null 2>&1 && echo -e "update ${OK}... " || echo -e "update ${FAIL}... "
+Write_no_newline "● Upgrade do SO. Aguarde... "
+sudo DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confold \
+  -o Dpkg::Options::=--force-confdef \
+  -y --allow-downgrades --allow-remove-essential --allow-change-held-packages \
+  -y -q upgrade > /dev/null 2>&1 && echo -en "ugrade ${OK}... " || echo -en "upgrade ${FAIL}... "
+sudo DEBIAN_FRONTEND=noninteractive apt-get -y -q autoremove > /dev/null 2>&1 && echo -e "autoremove ${OK}... " || echo -e "autoremove ${FAIL}... "
+
+# sudo with no password...
+sudo grep -q "^%sudo ALL=(ALL:ALL) NOPASSWD:ALL" /etc/sudoers 2> /dev/null && echo "sudo sem senha já aplicado" || {
+    Write "● Aplicando sudo sem senha" 
+    sudo cp /etc/sudoers /etc/sudoers.${BEXT} 2> /dev/null 
+    sudo sed -i /etc/sudoers -re 's/^%sudo.*/%sudo ALL=(ALL:ALL) NOPASSWD:ALL/g' 2> /dev/null 
+}
+
+# Desabilitar checagem automática de atualizações
+Write_no_newline "● Desabilitando atualização automática... "
+sudo sed -i /etc/apt/apt.conf.d/20auto-upgrades -re "s/"1"/"0"/g"  >/dev/null 2>&1
+sudo systemctl stop apt-daily-upgrade >/dev/null 2>&1
+sudo systemctl stop unattended-upgrades >/dev/null 2>&1
+sudo systemctl stop apt-daily-upgrade.timer >/dev/null 2>&1
+sudo systemctl disable apt-daily-upgrade.timer >/dev/null 2>&1 && echo -en "apt-daily-upgrade.timer ${OK}... " || echo -en "apt-daily-upgrade.timer ${FAIL}... "
+sudo systemctl disable apt-daily-upgrade >/dev/null 2>&1 && echo -en "apt-daily-upgrade ${OK}... " || echo -en "apt-daily-upgrade ${FAIL}... "
+sudo systemctl disable unattended-upgrades >/dev/null 2>&1 # && echo -e "unattended-upgrades ${OK}... " || echo -e "unattended-upgrades ${FAIL}... "
+sudo killall apt.systemd.daily >/dev/null 2>&1
+sudo killall apt >/dev/null 2>&1
+echo
+
+Write "● Habilitando rc.local..."
+
+sudo bash -c "cat >/etc/rc.local" <<'EOF'
+#!/bin/sh -e
+#
+# rc.local
+#
+# This script is executed at the end of each multiuser runlevel.
+# Make sure that the script will "exit 0" on success or any other
+# value on error.
+#
+# In order to enable or disable this script just change the execution
+# bits.
+#
+# By default this script does nothing.
+
+exit 0
+
+EOF
+
+sudo chmod +x /etc/rc.local
+sudo systemctl daemon-reload >/dev/null 2>&1
+sudo systemctl enable rc-local >/dev/null 2>&1
+sudo systemctl start rc-local >/dev/null 2>&1
+
+
+# -----------------------------------------------------------------------------
+# USERS AND GROUPS...
+
+# Initial PWs...
+ROOT_PWD=$(< /dev/urandom tr -cd "[:print:]" | head -c 14; echo)
+Write "● Alterando senha do usuário root"
+sudo echo "root:${ROOT_PWD}" | sudo chpasswd >/dev/null
+Do_log "User root password: ${ROOT_PWD}"; Mail_append "User root password: ${ROOT_PWD}<BR /> " 
+
+DIGIVOX_PWD=$(< /dev/urandom tr -cd "[:print:]" | head -c 14; echo)
+Write "● Alterando senha do usuário digivox"
+sudo echo "digivox:${DIGIVOX_PWD}" | sudo chpasswd >/dev/null
+Do_log "User digivox password: ${DIGIVOX_PWD}"; Mail_append "User digivox password: ${DIGIVOX_PWD}<BR /> " 
+
+$ON_PREMISES && {
+  KHOMP_PWD=$(< /dev/urandom tr -cd "[:print:]" | head -c 14; echo)
+  Do_log "Khomp admin password: ${KHOMP_PWD}"; Mail_append "Khomp admin password: ${KHOMP_PWD}<BR /> " 
+}
+
+COUNT_USERS=COUNT_ACCOUNTS=0
+TOTAL_USERS=${#USER_NAME[@]}
+# Adding users...
+for USER_EID in "${!USER_NAME[@]}"; do
+    let COUNT_USERS++
+
+  Write_no_newline "● Criando ${USER_EID}... "
+  if ! id -u ${USER_EID} > /dev/null 2>&1; then
+    sudo useradd -m -c "${USER_NAME[$USER_EID]},${USER_TEAM[$USER_EID]},," -s ${USER_SHELL} ${USER_EID} 2> /dev/null && echo -en "${OK}! " || echo -en "${FAIL}! "
+    # User at sudo/wheel, docker and suporte groups...
+    sudo usermod ${USER_EID} -aG sudo,docker,suporte 2> /dev/null
+    sudo usermod -aG wheel ${USER_EID} 2> /dev/null
+  else 
+    echo -en "Já existe! "
+  fi
+  sudo passwd -d ${USER_EID} > /dev/null 2>&1
+  # (Re)write authorized_keys and grant permissions...
+  echo -en "Chave RSA... "
+  test -d "/home/${USER_EID}/.ssh" || sudo mkdir /home/${USER_EID}/.ssh 2> /dev/null
+  sudo chmod 700 /home/${USER_EID}/.ssh 2> /dev/null
+  sudo grep -q "${USER_PKEY[$USER_EID]}" /home/${USER_EID}/.ssh/authorized_keys 2> /dev/null && echo -en "Já existe!" || {
+      echo "${USER_PKEY[$USER_EID]}" | sudo tee -a /home/${USER_EID}/.ssh/authorized_keys >/dev/null 2>&1 && echo -en "${OK}!" || echo -en "${FAIL}!"
+  }
+  echo " (${COUNT_USERS}/${TOTAL_USERS})"
+  sudo chown -R ${USER_EID} /home/${USER_EID}/.ssh 2> /dev/null
+  sudo chown -R ${USER_EID}:${USER_EID} /home/${USER_EID}/.ssh 2> /dev/null
+  sudo chmod 600 /home/${USER_EID}/.ssh/authorized_keys 2> /dev/null
+done
+
+for USER_EID in "${!USER_NAME[@]}"; do
+  USRT+=" ${USER_EID}"
+done
+Do_log "Users: ${USRT}"; Mail_append "Users: ${USRT}<BR /> "; unset USRT
+
+# -----------------------------------------------------------------------------
+# NETWORKING...
+
+Write_no_newline "● Configurando hosts... "
+sudo cp /etc/hosts /etc/hosts.${BEXT} >/dev/null 2>&1 
+sudo sed -i /etc/hosts -re "s/${OLD_HOSTNAME}/${HOSTNAME}/g" >/dev/null 2>&1 
+$SETUP_UNITY && {
+  echo -e "\n${UNITY_PGSQL_PRIMARY_IP} ${HOSTNAME} UNITY_DB_core UNITY_DB_log UNITY_DB_sip unity_db_local unity_db unity_db_log is_unity_sip" | sudo tee -a /etc/hosts >/dev/null 2>&1
+}
+
+Do_log "Internal IP: ${INTERNAL_IP} (Current: ${CURRENT_IP})"; Mail_append "Internal IP: ${INTERNAL_IP} (Current: ${CURRENT_IP})<BR /> " 
+$IS_AWS && {
+  sudo cp ${DPWD}/dgvx/dns-update /var/lib/cloud/scripts/per-boot/dns-update && (Do_log "dns-update instalado"; Mail_append "dns-update instalado<BR /> " )
+  sudo chmod +x /var/lib/cloud/scripts/per-boot/dns-update 2> /dev/null
+  /var/lib/cloud/scripts/per-boot/dns-update >/dev/null 2>&1
+  sudo cp /etc/cloud/cloud.cfg /etc/cloud/cloud.cfg.${BEXT} >/dev/null 2>&1 
+  sudo sed -i /etc/cloud/cloud.cfg -re "s/preserve_hostname: false/preserve_hostname: true/g" >/dev/null 2>&1 
+
+  Do_log "AWS - Public IP: ${AWS_PUB_IP} Instance ID: ${AWS_INSTANCE_ID} Zone: ${AWS_AZ}"
+  Mail_append "AWS Public IP: ${AWS_PUB_IP}<BR />AWS Instance ID: ${AWS_INSTANCE_ID}<BR />AWS Zone: ${AWS_AZ}<BR /> " 
+} || {
+  Do_log "Public IP: ${EXTERNAL_IP}"; Mail_append "Public IP: ${EXTERNAL_IP}<BR /> "
+}
+
+echo
+Write_no_newline "● Configurando hostname... "
+sudo hostnamectl set-hostname ${HOSTNAME} >/dev/null 2>&1 && echo -e "${BCyan}${HOSTNAME}${Color_Off}" || echo "${FAIL}"
+Do_log "Hostname: de ${OLD_HOSTNAME} para ${HOSTNAME}"; Mail_append "Hostname: de ${OLD_HOSTNAME} para ${HOSTNAME}<BR /> "
+MAIL_SUBJECT="[${0##*/}] ${HOSTNAME}"
+
+
+# echo "vm.max_map_count=262144" > /etc/sysctl.d/70-vbox.conf
+# sudo sysctl -w net.core.netdev_max_backlog=4096
+sudo cp /etc/sysctl.conf /etc/sysctl.conf.${BEXT}  >/dev/null 2>&1
+
+# Desabilitar IPv dá pau no Unity
+#echo -e "net.ipv6.conf.all.disable_ipv6=1" | sudo tee -a /etc/sysctl.conf >/dev/null 2>&1
+echo -e "net.ipv4.udp_rmem_min=141072" | sudo tee -a /etc/sysctl.conf >/dev/null 2>&1
+echo -e "net.ipv4.udp_mem=2097152 4194304 8388608" | sudo tee -a /etc/sysctl.conf >/dev/null 2>&1
+echo -e "net.core.netdev_max_backlog=4096" | sudo tee -a /etc/sysctl.conf >/dev/null 2>&1
+echo -e "net.core.rmem_default=262144" | sudo tee -a /etc/sysctl.conf >/dev/null 2>&1
+echo -e "net.core.rmem_max=67108864\n" | sudo tee -a /etc/sysctl.conf >/dev/null 2>&1
+echo -e "net.core.somaxconn=65365\n" | sudo tee -a /etc/sysctl.conf >/dev/null 2>&1
+echo -e "vm.swappiness=10" | sudo tee -a /etc/sysctl.conf >/dev/null 2>&1
+echo -e "vm.vfs_cache_pressure=50" | sudo tee -a /etc/sysctl.conf >/dev/null 2>&1
+echo -e "vm.dirty_background_ratio=5" | sudo tee -a /etc/sysctl.conf >/dev/null 2>&1
+echo -e "vm.overcommit_memory = 1" | sudo tee -a /etc/sysctl.conf >/dev/null 2>&1
+
+sudo sysctl -p >/dev/null 2>&1 && (Do_log "sysctl configurado"; Mail_append "sysctl configurado<BR /> ")
+
+
+# -----------------------------------------------------------------------------
+# INSTALL REQUIREMENTS AND UTILITIES
+
+#--install-recommends 
+# mailutils mailutils-doc vnstat
+# tput
+Write_no_newline "● Instalando utilitários. Pode levar alguns minutos. Aguarde... "
+sudo apt-get install --no-show-upgraded -y -q \
+  pwgen inxi tree ccze grc multitail rpl htop iotop iftop most bmon xmlstarlet neofetch \
+  rsync lshw unzip mtr tcpdump jq pv pydf nload ncdu gnupg2 ipcalc sipcalc lsb-release \
+  sendemail libio-socket-ssl-perl libnet-ssleay-perl bc man-db dnsutils traceroute \
+  net-tools iptraf vim nmap telnet curl wget sngrep bash-completion locate socat \
+  apt-transport-https ca-certificates gnupg-agent software-properties-common sip-tester \
+  libtpl-dev tmux exa lsof whois lynx redis-tools httping lvm2 \
+  >/dev/null 2>&1 && echo -e "${OK}" || echo -e "apt-get install ${FAIL}"
+
+# LS Deluxe
+#wget --no-check-certificate -q https://github.com/Peltoche/lsd/releases/download/0.23.1/lsd-musl_0.23.1_amd64.deb >/dev/null 2>&1 || Write "● ${FAIL} na instalação do utilitário 'LS Deluxe'... "
+sudo dpkg -i ${DPWD}/lsd-musl_0.23.1_amd64.deb >/dev/null 2>&1
+
+if $ON_PREMISES; then
+  sudo apt-get install --no-show-upgraded -y -q lm-sensors \
+  >/dev/null 2>&1 || echo -e "● apt-get install para on-premises FAILED"
+
+  [ "${VENDOR:0:6}" == "VMware" ] && {
+    Write_no_newline "● VMware detectado. Instalando open-vm-tools... "
+    sudo apt-get install --no-show-upgraded -y -q open-vm-tools \
+    >/dev/null 2>&1 && echo -e "${OK}" || echo -e "${FAIL}"
+  }
+
+fi
+# OS update...
+sudo apt-get update -y -q >/dev/null 2>&1 || echo -e "● apt-get update FAILED"
+sudo apt-get autoremove -y -q >/dev/null 2>&1 || echo -e "● apt-get autoremove FAILED"
+#sudo apt-get upgrade -y -q --install-suggests
+
+
+
+# -----------------------------------------------------------------------------
+# DIGIVOX STUFF...
+
+sudo mv /etc/motd /etc/motd.${BEXT}
+sudo rm -f /etc/update-motd.d/10logo
+sudo rm -f /etc/update-motd.d/10-uname
+
+sudo cp ${DPWD}/dgvx/dgvx-motd /etc/update-motd.d/10logo
+sudo chmod a+x /etc/update-motd.d/*
+
+sudo cp ${DPWD}/dgvx/dgvx-bash-* /opt/digivox/etc/
+sudo chmod a+x,a+r /opt/digivox/etc/dgvx-bash-*
+
+sudo cp ${DPWD}/dgvx/dgvx-ogg-converter /opt/digivox/scripts/
+sudo chmod -R +x /opt/digivox/*scripts*
+sudo chgrp -R suporte /opt/digivox/etc /opt/digivox/*scripts*
+sudo chmod 755 /opt/digivox/etc
+
+
+# Profile...
+echo -e "\nif [ -d \"/opt/digivox/scripts\" ] ; then\n  PATH=\"/opt/digivox/scripts:\$PATH\"\nfi\nif [ -d \"/opt/digivox/docker-scripts\" ] ; then\n  PATH=\"/opt/digivox/docker-scripts:\$PATH\"\nfi" | sudo tee -a /etc/skel/.profile >/dev/null 2>&1
+echo -e "\nsource /opt/digivox/etc/dgvx-bash-profile" | sudo tee -a /etc/skel/.profile >/dev/null 2>&1
+#echo "echo -e \"\n● Certeza que precisa ser root? Procure usar 'sudo'\n\"" | sudo tee -a /root/.profile >/dev/null 2>&1
+for i in /home/*/.profile /root/.profile; do
+    sudo grep "/opt/digivox/scripts" $i >/dev/null 2>&1 || \
+    echo -e "\nif [ -d \"/opt/digivox/scripts\" ] ; then\n  PATH=\"/opt/digivox/scripts:\$PATH\"\nfi\nif [ -d \"/opt/digivox/docker-scripts\" ] ; then\n  PATH=\"/opt/digivox/docker-scripts:\$PATH\"\nfi" | sudo tee -a $i >/dev/null 2>&1
+    sudo grep "^source /opt/digivox/etc/dgvx-bash-profile" $i >/dev/null 2>&1 || echo -e "\nsource /opt/digivox/etc/dgvx-bash-profile" | sudo tee -a $i >/dev/null 2>&1
+    sudo sed -i -E $i -re 's/source \/etc\/digivox\/digivox-bash-profile//g' # Migration
+done
+
+source /opt/digivox/etc/dgvx-bash-profile >/dev/null 2>&1
+
+# VIM...
+echo -e 'set showmatch " Mostrar colchetes correspondentes' | sudo tee -a /etc/vim/vimrc.local >/dev/null 2>&1
+echo -e 'set ts=4 " Ajuste tab' | sudo tee -a /etc/vim/vimrc.local >/dev/null 2>&1
+echo -e 'set sts=4 " Ajuste tab' | sudo tee -a /etc/vim/vimrc.local >/dev/null 2>&1
+echo -e 'set sw=4 " Ajuste tab' | sudo tee -a /etc/vim/vimrc.local >/dev/null 2>&1
+echo -e 'set autoindent " Ajuste tab' | sudo tee -a /etc/vim/vimrc.local >/dev/null 2>&1
+echo -e 'set smartindent " Ajuste tab' | sudo tee -a /etc/vim/vimrc.local >/dev/null 2>&1
+echo -e 'set smarttab " Ajuste tab' | sudo tee -a /etc/vim/vimrc.local >/dev/null 2>&1
+echo -e 'set expandtab " Ajuste tab' | sudo tee -a /etc/vim/vimrc.local >/dev/null 2>&1
+echo -e 'set background=dark' | sudo tee -a /etc/vim/vimrc.local >/dev/null 2>&1
+echo -e 'set number " Mostra numero da linhas' | sudo tee -a /etc/vim/vimrc.local >/dev/null 2>&1
+echo -e 'syntax on' | sudo tee -a /etc/vim/vimrc.local >/dev/null 2>&1
+
+# sudo bash -c "cat >/etc/vim/vimrc.local" <<'EOF'
+
+# EOF
+
+
+$IS_AWS && {
+  Write "● NTP/Chrony já instalado (Instância AWS). Alterando referência NTP.br"
+  sudo sed -i -E /etc/chrony/chrony.conf -re 's/server 169.254.169.123 prefer iburst/server a.st1.ntp.br prefer iburst\nserver b.st1.ntp.br iburst\nserver c.st1.ntp.br iburst\nserver d.st1.ntp.br iburst\nserver gps.ntp.br iburst\nserver 169.254.169.123 iburst/g'
+ 
+} || {
+  # OPENNTPD...
+  # echo -e "● Configurando NTP... "
+  # sudo apt -q -y purge ntp 2> /dev/null 
+  # sudo apt install -q -y openntpd
+  # sudo service openntpd stop 2> /dev/null 
+  # sudo sed -i -E /etc/openntpd/ntpd.conf -re 's/servers 0.debian.pool.ntp.org/servers pool.ntp.br\nservers 0.debian.pool.ntp.org/g'
+  # #sudo service openntpd restart 2> /dev/null
+  # sudo systemctl enable openntpd && sudo systemctl restart openntpd 2> /dev/null
+  # Teste
+  # timedatectl show-timesync
+  # sudo timedatectl timesync-status
+
+  # CHRONY...
+  #sudo apt -q -y purge ntp > /dev/null 2>&1
+  Write "● Configurando NTP... "
+  sudo apt -q -y purge openntpd > /dev/null 2>&1
+  sudo apt-get -q -y install chrony > /dev/null 2>&1
+  sudo cp /etc/chrony/chrony.conf /etc/chrony/chrony.conf.${BEXT}
+  sudo cp /etc/default/chrony /etc/default/chrony.${BEXT}
+
+  sudo sed -i -E /etc/chrony/chrony.conf -re 's/^pool 2.debian.pool.ntp.org iburst/#pool 2.debian.pool.ntp.org iburst\nserver a.st1.ntp.br prefer iburst\nserver b.st1.ntp.br iburst\nserver c.st1.ntp.br iburst\nserver d.st1.ntp.br iburst\nserver gps.ntp.br iburst/g'
+  # Permitir atualização de RTC...
+  sudo sed -i -E /etc/default/chrony -re 's/-F -1//g'
+  sudo sed -i -E /etc/default/chrony -re 's/-F 1//g'
+  
+  echo -e "\n# Diretiva que indica que o offset UTC e leapseconds devem ser lidos\n# da base tz (de time zone) do sistema\nleapsectz right/UTC" | sudo tee -a /etc/chrony/chrony.conf > /dev/null 2>&1
+  echo -e "\n# Clientes permitidos\nallow ${INTERNAL_NETWORK}" | sudo tee -a /etc/chrony/chrony.conf > /dev/null 2>&1
+  
+  sudo systemctl enable chrony > /dev/null 2>&1 && (Do_log "Chrony instalado"; Mail_append "Chrony instalado<BR /> ")
+}
+sudo systemctl restart chrony > /dev/null 2>&1
+sudo chronyc makestep > /dev/null 2>&1
+
+# TESTE
+# chronyc tracking
+# chronyc sources -v
+# chronyc sourcestats
+# sudo chronyc serverstats
+# sudo journalctl -u chrony
+
+
+# -----------------------------------------------------------------------------
+#                            PRODUCTS AND SERVICES
+# -----------------------------------------------------------------------------
+
+[ ! "${SSH_PORT}" = "22" ] && Setup_ssh                    # SSH
+
+$SETUP_SIP_SERVER && Setup_memcached                       # MEMCACHED
+
+$SETUP_REDIS && Setup_redis                                # REDIS
+
+Setup_nginx                                                # NGINX
+
+Setup_docker                                               # DOCKER
+
+$SETUP_ZABBIX && Setup_zabbix                              # ZABBIX
+
+$SETUP_VPN && Setup_vpn                                    # VPN
+
+$SETUP_POSTGRESQL && {                                     # POSTGRESQL
+  
+  Setup_postgres                                           # POSTGRESQL DB1
+
+  $SETUP_POSTGRES_DB2 && {                                 # POSTGRESQL DB2
+    Setup_postgres_db2
+    # AQUI: instalar em outro DB2? (Fora do IF) -h ${PGSQL_PRIMARY_IP}
+    Write "● Importando Unity/${UNITY_DB_SIP} para a base unity_sip..."
+    sudo -iu postgres psql -q -d unity_sip -p 5433 -f ${DPWD}/Unity/${UNITY_DB_SIP} >/dev/null
+  }
+  
+  sudo pg_lsclusters # Testing...
+
+}
+
+$SETUP_DNS && Setup_dns                                    # DNS
+
+$SETUP_KEEPALIVED && Setup_keepalived                      # KEEPALIVED
+
+$SETUP_UNITY && {
+
+  $SETUP_UNITY_MANAGER && Setup_unity_manager            # UNITY MANAGER
+
+  if $SETUP_POSTGRES && ! $SETUP_REPLICA; then           # UNITY MANAGER POST INSTALL
+      # AQUI: instalar em outro DB1/DB2? (Fora do IF) -h ${PGSQL_PRIMARY_IP}
+      Write "● Post install atual do Unity (OUT/2022)..."
+      echo -e "   * DB1 - Atualizando tabela v_access_control_nodes: 192.168.42.42/32 > ${INTERNAL_IP}/32 ..."
+      sudo -u postgres psql -d unity_core -p5432 -Atc "update v_access_control_nodes SET node_cidr \
+        = '${INTERNAL_IP}/32' where node_cidr='192.168.42.42/32';" -P pager=off >/dev/null
+
+      sudo -u postgres psql -d unity_core -p5432 -Atc "insert into v_access_control_nodes values \
+      ('5275c710-f538-40d2-a6df-421995699b09','9cc766b2-8c0a-4921-a892-85dbe71f8a74','allow','172.17.0.0/16','','');" -P pager=off >/dev/null
+
+      sudo -u postgres psql -d unity_core -p5432 -Atc "insert into v_access_control_nodes values \
+      ('1a55a6d5-ea10-4e4d-b015-f3df3002c997','9cc766b2-8c0a-4921-a892-85dbe71f8a74','allow','${INTERNAL_IP}/32','','');" -P pager=off >/dev/null
+
+      # unity_core está com alguns lixos de dialplan, e causam problemas com roteamento no sistema 
+      echo -e "   * DB1 - Corrigindo bug Unity DB core: update v_dialplans SET dialplan_enabled = false"
+      sudo -u postgres psql -d unity_core -p5432 -Atc "update v_dialplans SET dialplan_enabled = false;" -P pager=off >/dev/null
+      sudo rm -f /opt/digivox/unity/unity-sip-server/var/lib/unity/db/*.db
+
+      echo -e "   * DB2 - Corrigindo bug Unity DB log: alterando tabela log_sincronizacao"
+      sudo -u postgres psql -d unity_log -p5433 -Atc "alter table log_sincronizacao alter COLUMN ip drop not null;" -P pager=off >/dev/null
+      sudo -u postgres psql -d unity_log -p5433 -Atc "alter table log_sincronizacao alter COLUMN servidor drop not null;" -P pager=off >/dev/null
+
+      # echo -e "   * DB1 - Configurando site padrão e servidores"
+      # SQL="COPY public.site (id, nome, descricao, responsavel_sincronizacao, codigo, nome_arquivo) FROM stdin;
+      # 404b4886-dbd4-43ee-bd0b-4340a2c8b3c1    Padrão          f       \N
+      # \.
+
+      # COPY public.servidor (id, descricao, site_id, ldap_servidor_id, ip, porta, login, senha, nome_banco_dados_manager, nome_banco_dados_pabx, nome_banco_dados_core, nome_banco_dados_log, ip_2, porta_2, login_2, senha_2, nome_banco_dados_manager_2, nome_banco_dados_pabx_2, nome_banco_dados_core_2, nome_banco_dados_log_2, caminho_gravacoes, ip_banco_dados_manager, ip_banco_dados_pabx, ip_banco_dados_core, ip_banco_dados_log, porta_banco_dados_manager, porta_banco_dados_pabx, porta_banco_dados_core, porta_banco_dados_log, login_banco_dados_manager, login_banco_dados_pabx, login_banco_dados_core, login_banco_dados_log, senha_banco_dados_manager, senha_banco_dados_pabx, senha_banco_dados_core, senha_banco_dados_log, ip_banco_dados_manager_2, ip_banco_dados_pabx_2, ip_banco_dados_core_2, ip_banco_dados_log_2, porta_banco_dados_manager_2, porta_banco_dados_pabx_2, porta_banco_dados_core_2, porta_banco_dados_log_2, login_banco_dados_manager_2, login_banco_dados_pabx_2, login_banco_dados_core_2, login_banco_dados_log_2, senha_banco_dados_manager_2, senha_banco_dados_pabx_2, senha_banco_dados_core_2, senha_banco_dados_log_2, configuracao_detalhada, dominio_im, tipo_servidor_im_presence, prioridade, nome_banco_dados_im_presence, ip_banco_dados_im_presence, porta_banco_dados_im_presence, login_banco_dados_im_presence, senha_banco_dados_im_presence, nome_banco_dados_im_presence_2, ip_banco_dados_im_presence_2, porta_banco_dados_im_presence_2, login_banco_dados_im_presence_2, senha_banco_dados_im_presence_2, tipo, balanced) FROM stdin;
+      # 73c6c64c-d9b3-ccab-8de8-476d489160ea            404b4886-dbd4-43ee-bd0b-4340a2c8b3c1    \N      ${INTERNAL_IP}  9001    \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N\N       \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      f       \N      \N      0       \N\N       \N      \N      \N      \N      \N      \N      \N      \N      manager f
+      # 32532e85-46e0-e438-ae71-24c6572b3230            404b4886-dbd4-43ee-bd0b-4340a2c8b3c1    \N      ${INTERNAL_IP}  8021    \N      ${UNITY_PGSQL_PW}       \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N\N       \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      f       \N      \N0\N      \N      \N      \N      \N      \N      \N      \N      \N      \N      sip     f
+      # f4a70742-d77f-2ee6-431c-6b0c7f85e5b2            404b4886-dbd4-43ee-bd0b-4340a2c8b3c1    \N              \N                      unity   unity_sip       unity_core      unity_log                                       unity   unity_sip       unity_core      unity_log  \N      ${INTERNAL_IP}  ${INTERNAL_IP}  ${INTERNAL_IP}  ${INTERNAL_IP}  5432    5433    5432    5433    ${UNITY_PGSQL_USER}     ${UNITY_PGSQL_USER}     ${UNITY_PGSQL_USER}     ${UNITY_PGSQL_USER}     ${UNITY_PGSQL_PW}       ${UNITY_PGSQL_PW}       ${UNITY_PGSQL_PW}  ${UNITY_PGSQL_PW}       ${INTERNAL_IP}  ${INTERNAL_IP}  ${INTERNAL_IP}  ${INTERNAL_IP}  5432    5433    5432    5433    ${UNITY_PGSQL_USER}     ${UNITY_PGSQL_USER}     ${UNITY_PGSQL_USER}     ${UNITY_PGSQL_USER}     ${UNITY_PGSQL_PW}       ${UNITY_PGSQL_PW} ${UNITY_PGSQL_PW}        ${UNITY_PGSQL_PW}       t       \N      \N      0                       \N                                      \N                      db      f
+      # b72a1523-d027-5576-b1ce-5f596667777f            404b4886-dbd4-43ee-bd0b-4340a2c8b3c1    \N      ${INTERNAL_IP}  8080    \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N\N       \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      f       \N      \N      0       \N\N       \N      \N      \N      \N      \N      \N      \N      \N      integration     f
+      # 919dbd18-7df7-25d7-46bb-3fb5457f5335    \N      404b4886-dbd4-43ee-bd0b-4340a2c8b3c1    \N      ${INTERNAL_IP}  8080    \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      /opt/digivox/unity/unity-sip-server/var/lib/unity/recordings/      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      \N\N       \N      \N      f       \N      \N      0       \N      \N      \N      \N      \N      \N      \N      \N      \N      \N      record  f
+      # \."
+      # echo "${SQL}" | sed -e 's/^[ \t]*//' | tee /tmp/temp.sql > /dev/null 2>&1
+      # sudo -iu postgres psql -U postgres -p5432 -d unity -f /tmp/temp.sql >/dev/null
+
+      $SETUP_UNITY_MONITORING && sudo -iu postgres psql -U postgres -p5432 -d unity -Atc "insert into device_template (id, nome, fabricante) values \
+      ('5558b321-f660-4ec5-63ac-baa6bcc10fe4', 'yealink/t30p', 'Yealink');" -P pager=off >/dev/null
+
+  fi
+
+  $SETUP_SIP_SERVER && {
+
+    Setup_sipserver                                        # UNITY SIPSERVER
+    Setup_unity_integration_server                         # UNITY INTEGRATION SERVER
+
+    $SETUP_UNITY_MONITORING && Setup_unity_monitoring      # UNITY MONITORING
+
+    $SETUP_UNITY_MONIT && {
+      Setup_unity_monit                                    # UNITY MONIT - Web, Web API, Cache Upater, CallCenter Worker, CallCenter Connector + (Mongo DB, Rabbit MQ)
+      Setup_unity_cc                                       # UNITY CC    - callcenter-active-monitor, callcenter-active-event, unity-events-logs, unity-protocol-update
+    }
+
+    $SETUP_UNITY_IVR && Setup_unity_ivr                    # UNITY IVR
+  }
+
+  $SETUP_UNITY_API && Setup_unity_api                    # UNITY API
+
+  #sudo docker ps -a --format "table {{.Names}} {{.ID}}\t{{.Image}}\t{{.Status}} - {{.RunningFor}} {{.Ports}}" | ccze -m ansi
+  # AQUI --filter "name=unity*" 
+  sudo docker ps --all --format "{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}" \
+    | (echo -e "NAMES\tIMAGE\tPORTS\tSTATUS" && cat) \
+    | awk '{printf "\033[1;32m%s\t\033[01;38;5;95;38;5;196m%s\t\033[00m\033[1;34m%s\t\033[01;90m%s %s %s %s %s %s %s\033[00m\n", $1, $2, $3, $4, $5, $6, $7, $8, $9, $10;}' \
+    | column -s$'\t' -t \
+    | awk 'NR<2{print $0;next}{print $0 | "sort --key=2"}'
+
+  $SETUP_UNITY_PROVISIONING && Setup_unity_provisioning    # UNITY PROVISIONING
+
+}
+
+$SETUP_CITRUS && {                                         # CITRUS
+  Setup_rabbit
+  Setup_citrus                        
+}
+
+# -----------------------------------------------------------------------------
+#                                 THE END
+# -----------------------------------------------------------------------------
+
+echo
+echo -e "${BBlue}${0##*/}${Color_Off} v${SCRIPT_VERSION} - ${BYellow}PROCESSAMENTO CONCLUÍDO!${Color_Off}"
+Write "● Log da instalação (colete esses dados): ${BWhite}${INSTALL_LOG}${Color_Off}"
+
+$SETUP_UNITY_MANAGER && {
+  UNITY_CODIGO_ATIVACAO=$(curl -k -s http://${INTERNAL_IP}:9001/public/licenca/codigo-ativacao)
+  Do_log "Código de ativação do Unity: ${UNITY_CODIGO_ATIVACAO}"; Mail_append "Código de ativação do Unity: ${UNITY_CODIGO_ATIVACAO}<BR /> "
+  echo -e "${BCyan}***${Color_Off} Código de ativação do Digivox Unity: ${BGreen}${UNITY_CODIGO_ATIVACAO}${Color_Off}"
+  echo -e "${BCyan}***${Color_Off} OU, baixe o arquivo com o código de ativação:"
+  echo "http://${INTERNAL_IP}:9001/public/licenca/codigo-ativacao"
+}
+
+$ON_PREMISES && { 
+  echo -e "${BCyan}***${Color_Off} Se este é um appliance Khomp: tutorial de acesso remoto no README.md"
+  echo -e "${BCyan}***${Color_Off} Configure a senha para o usuário 'admin' do Khomp: ${KHOMP_PWD}"
+}
+echo
+echo -e "${BCyan}***${Color_Off} É ${BWhite}altamente recomendável${Color_Off} reiniciar o servidor para testar as configurações. Após o reboot, é normal demorar alguns instantes para que todos os serviços fiquem diponíves"
+# AQUI
+echo -e "${BCyan}***${Color_Off} Conferir: Zabbix (local/no servidor) e VPN"
+echo -e "${BCyan}***${Color_Off} Instalar: Planilha, DPanel e dgvx-backup (dgvx-ogg-converter no cron?)"
+echo -e "${BCyan}***${Color_Off} Realize as personalizações do cliente"
+echo -e "${BCyan}***${Color_Off} Nova senha do usuário 'digivox': ${BWhite}${DIGIVOX_PWD}${Color_Off}"
+echo -e "${BCyan}***${Color_Off} Teste seu login com chave RSA (abra outro terminal). Dele, remova o usuário 'digivox': sudo userdel -r digivox"
+echo -e "${BCyan}***${Color_Off} Nesta outra conexão, digite 'dgvx' para testes básicos dos produtos instalados"
+[ ! "${INTERNAL_IP}" == "${CURRENT_IP}" ] && {
+  echo -e "${BCyan}***${Color_Off}    ${ALERT}ATENÇÃO${Color_Off}: IP atual (${CURRENT_IP}) é diferente do que foi configurado no software (${INTERNAL_IP})"
+  echo -e "       Recomenda-se alterar a rede local, pois alguns serviços podem não funcionar"
+}
+
+Do_log "END - $(date)"; Mail_append "END - $(date)<BR /> "
+MAIL_STATUS="OK"
+Mail_append "\n<BR /> <b>${0##*/}</b> v${SCRIPT_VERSION} *** <span style='color: #053552; text-shadow: 3px 2px red; font-weight: bold;'>Infraestrutura e TI <span style='color: #0e547c;'>Bot</span></span>. Mensagem <i>automágica!</i> "
+$MAIL_REPORT && Mail_send "${MAIL_FILE}" "${MAIL_STATUS}"
+sudo rm -f $MAIL_FILE /tmp/backup_temp_mail_file > /dev/null 2>&1
+
+#EOF
