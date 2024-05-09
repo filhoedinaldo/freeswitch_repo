@@ -1,0 +1,14 @@
+<extension name="Set_Outbound_CID_Forward" continue="true" uuid="7f880367-a58a-45c0-86d2-9e2f43e0a020">
+	<condition field="${forward_all_enabled}" expression="true" break="on-true">
+		<action application="lua" data="unity/outbound-cid-forward.lua" />
+	</condition>
+	<condition field="${forward_busy_enabled}" expression="true" break="on-true">
+		<action application="lua" data="unity/outbound-cid-forward.lua" />
+	</condition>
+	<condition field="${forward_no_answer_enabled}" expression="true" break="on-true">
+		<action application="lua" data="unity/outbound-cid-forward.lua" />
+	</condition>
+	<condition field="${forward_user_not_registered_enabled}" expression="true" break="on-true">
+		<action application="lua" data="unity/outbound-cid-forward.lua" />
+	</condition>
+</extension>
