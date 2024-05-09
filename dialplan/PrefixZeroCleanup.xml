@@ -1,0 +1,32 @@
+<extension name="Trata_Zero" continue="true" uuid="f35f8a2c-aed5-4d3f-ab66-c731c94b759a">
+	<condition field="destination_number" expression="^.*0([1-9]\d{7,8})$" break="on-true">
+		<action application="log" data="========== UNITY - LIGACAO LOCAL" />
+		<action application="set" data="extension=$1" inline="true"/>
+		<action application="set" data="destination_number=$1" inline="true"/>
+		<action application="set" data="dialed_extension=$1" inline="true"/>
+	</condition>
+	<condition field="destination_number" expression="^.*0(?:|[1-9]{2})([1-9]{2}[3-9]\d{7,8})$" break="on-true">
+		<action application="log" data="========== UNITY - LIGACAO LDN (Longa Distância Nacional)" />
+		<action application="set" data="extension=015$1" inline="true"/>
+		<action application="set" data="destination_number=015$1" inline="true"/>
+		<action application="set" data="dialed_extension=015$1" inline="true"/>
+	</condition>
+	<condition field="destination_number" expression="^.*0(0[3,8]00\d{7})$" break="on-true">
+		<action application="log" data="========== UNITY - LIGACAO 0800, 0300" />
+		<action application="set" data="extension=$1" inline="true"/>
+		<action application="set" data="destination_number=$1" inline="true"/>
+		<action application="set" data="dialed_extension=$1" inline="true"/>
+	</condition>
+	<condition field="destination_number" expression="^(?:0|00)(1\d{2,4})$" break="on-true">
+		<action application="log" data="========== UNITY - LIGACAO SERVICO" />
+		<action application="set" data="extension=$1" inline="true"/>
+		<action application="set" data="destination_number=$1" inline="true"/>
+		<action application="set" data="dialed_extension=$1" inline="true"/>
+	</condition>
+	<condition field="destination_number" expression="^.*0(00[1-9]{2}\d+)$" break="on-true">
+		<action application="log" data="========== UNITY - LIGACAO LDI (Longa Distância Internacional)" />
+		<action application="set" data="extension=$1" inline="true"/>
+		<action application="set" data="destination_number=$1" inline="true"/>
+		<action application="set" data="dialed_extension=$1" inline="true"/>
+	</condition>
+</extension>
