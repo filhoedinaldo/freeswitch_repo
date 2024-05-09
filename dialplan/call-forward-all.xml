@@ -1,0 +1,7 @@
+<extension name="call-forward-all" continue="true" uuid="e560783a-5bf9-447e-bce4-cfbf254fe4d8">
+	<condition field="${user_exists}" expression="^true"  />
+	<condition field="${forward_all_enabled}" expression="^true" >
+		<action application="set" data="caller_id_number=${destination_number}" />
+		<action application="transfer" data="${forward_all_destination} XML ${domain_name}" />
+	</condition>
+</extension>
