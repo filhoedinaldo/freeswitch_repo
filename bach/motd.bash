@@ -39,7 +39,7 @@ SERVICES=(
     "Docker|docker"
     "Memcached|memcached.service"
     "NGINX|nginx.service"
-    "Zabbix Agent|zabbix-agent.service"
+    "Zabbix Agent|zabbix-agent2.service"
     "HAProxy|haproxy.service"
     "OpenSips|opensips.service"
     "Redis|redis|container"
