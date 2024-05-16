@@ -1,5 +1,5 @@
 <extension name="Trata_Zero" continue="true" uuid="f35f8a2c-aed5-4d3f-ab66-c731c94b759a">
-	<condition field="destination_number" expression="^.*0([1-9]\d{7,8})$" break="on-true">
+	<condition field="destination_number" expression="^(?:|0)([3-9]\d{7,8})$" break="on-true">
 		<action application="log" data="========== UNITY - LIGACAO LOCAL" />
 		<action application="set" data="extension=$1" inline="true"/>
 		<action application="set" data="destination_number=$1" inline="true"/>
