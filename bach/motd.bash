@@ -57,6 +57,7 @@ SERVICES=(
     "Unity Call Center Active Monitor|callcenter-active-monitor|container"
     "Unity Monitoring|unity-monitoring|container"
     "Unity Protocol|unity-protocol-update|container"
+    "Unity Events Logs|unity-events-logs|container"
     "Squad Login|squad-login|container"
     "Squad Softphone|new-squad-sp|container"
     "Squad Events|squad-events|container"
